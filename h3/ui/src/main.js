@@ -49,10 +49,15 @@ let rafPending = false;
 let pendingX  = 0;
 let pendingY  = 0;
 
+// ── Data URLs — local in dev, GitHub release in production ─────────────────
+const DATA = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+  ? '/data'
+  : 'https://pub-4ad65c005bad4ef08b4bca5befc474b8.r2.dev';
+
 // ── Load data ──────────────────────────────────────────────────────────────
 Promise.all([
   fetch('/data/adm2_render.geojson').then(r => r.json()),
-  loadH3('/data/h3_geo.bin', '/data/h3_names.json'),
+  loadH3(`${DATA}/h3_geo.bin`, `${DATA}/h3_names.json`),
 ]).then(([gj, h3inst]) => {
   for (const f of gj.features) f.properties._c = countryFill(f.properties.country);
   geojson  = gj;

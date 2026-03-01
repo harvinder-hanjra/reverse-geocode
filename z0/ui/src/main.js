@@ -49,10 +49,15 @@ let rafPending = false;
 let pendingX   = 0;
 let pendingY   = 0;
 
+// ── Data URLs — local in dev, GitHub release in production ────────────────────
+const DATA = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+  ? '/data'
+  : 'https://pub-4ad65c005bad4ef08b4bca5befc474b8.r2.dev';
+
 // ── Load data in parallel with map boot ───────────────────────────────────────
 Promise.all([
   fetch('/data/adm2_render.geojson').then(r => r.json()),
-  loadZ0('/data/z0_geo.bin'),
+  loadZ0(`${DATA}/z0_geo.bin`),
 ]).then(([gj, z0inst]) => {
   // Stamp per-country fill color as a feature property (computed once here,
   // not per-render). MapLibre copies this to its worker thread.
