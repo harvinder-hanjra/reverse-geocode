@@ -56,7 +56,7 @@ const DATA = (location.hostname === 'localhost' || location.hostname === '127.0.
 
 // ── Load data ──────────────────────────────────────────────────────────────
 Promise.all([
-  fetch('/data/adm2_render.geojson').then(r => r.json()),
+  fetch(`${DATA}/adm2_render.geojson`).then(r => r.json()),
   loadH3(`${DATA}/h3_geo.bin`, `${DATA}/h3_names.json`),
 ]).then(([gj, h3inst]) => {
   for (const f of gj.features) f.properties._c = countryFill(f.properties.country);

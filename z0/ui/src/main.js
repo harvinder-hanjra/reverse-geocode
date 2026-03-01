@@ -56,7 +56,7 @@ const DATA = (location.hostname === 'localhost' || location.hostname === '127.0.
 
 // ── Load data in parallel with map boot ───────────────────────────────────────
 Promise.all([
-  fetch('/data/adm2_render.geojson').then(r => r.json()),
+  fetch(`${DATA}/adm2_render.geojson`).then(r => r.json()),
   loadZ0(`${DATA}/z0_geo.bin`),
 ]).then(([gj, z0inst]) => {
   // Stamp per-country fill color as a feature property (computed once here,
