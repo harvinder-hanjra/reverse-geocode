@@ -4,24 +4,25 @@ An exploration of offline reverse geocoding — given (lat, lon), return the
 country and administrative region in the browser, with no server, no API key,
 and no network calls after initial load.
 
-Three separate implementations were built to compare different spatial indexing
-strategies at the same problem. Each has its own binary format, builder, and
-interactive map UI.
+**[Live demo →](https://lulzx.github.io/reverse-geocode/)**
 
-    GADM 4.1 (global administrative boundaries, ADM2 level)
+Three separate implementations compare different spatial indexing strategies
+at the same problem. A unified web app lets you switch between them at load
+time.
+
+    GADM 4.1 (global administrative boundaries, finest available level)
            |
            v
-    47 205 regions covering the entire land surface
+    355 685 regions — ADM2 through ADM5 — covering the entire land surface
            |
         -----------------------------------------------
         |                   |                         |
         v                   v                         v
      z0/                 s2/                        h3/
-     RGEO0002            RGEO0001                   LKHA0001
+     RGEO0003            RGEO0001                   LKHA0001
      Zig builder         Python builder             Python builder
-     Morton boundary     H3 block binary search     H3 flat binary search
-     11 MB               55 MB                      10 MB
-     port 5174           port 5175                  port 5176
+     Morton boundary     S2 block binary search     H3 flat binary search
+     20 MB               27 MB                      13 MB
 
 
 ## The problem
@@ -31,7 +32,7 @@ contains it. The naive implementation — load all polygons, test each one — i
 far too slow for interactive use and the polygon data is hundreds of megabytes.
 
 The challenge is building a data structure that:
-- fits in a small binary file (< 60 MB, ideally < 15 MB)
+- fits in a small binary file (< 60 MB)
 - can be loaded entirely into browser memory
 - answers queries in microseconds, not milliseconds
 - requires no server — pure static file serving
@@ -43,55 +44,48 @@ index that the browser can search with simple arithmetic.
 
 ## Data sources
 
-**GADM 4.1** (Global Administrative Areas) provides ADM2-level boundaries for
-the entire world: districts, counties, prefectures — the second level of
-administrative subdivision within each country.
+**GADM 4.1** (Global Administrative Areas) provides boundaries up to ADM5
+for many countries — communes in France, villages in Rwanda, suburbs in the
+UK and Russia. `extract_gadm.py` queries the 2.6 GB SQLite GeoPackage and
+picks the finest available level per feature:
 
-The data comes as a SQLite database. `extract_gadm.py` queries it to produce
-a flat GeoJSON FeatureCollection with `country`, `adm1`, and `adm2` properties
-on each feature.
+    NAME_5 → ADM5 (communes, villages)   51 427 features
+    NAME_4 → ADM4 (townships, suburbs)  147 515 features
+    NAME_3 → ADM3 (districts, boroughs) 120 510 features
+    NAME_2 → ADM2 (counties, prefects)   36 245 features  (fallback)
 
-GADM was chosen over alternatives like geoBoundaries because:
-- it has global coverage with no significant gaps
-- the polygons are consistent in structure
-- it distinguishes country / adm1 / adm2 cleanly
+Total: **355 697 features** with globally unique GIDs used as dedup keys.
 
-**Natural Earth** (10m ADM1) supplements GADM for the 88 countries absent from
-it — small island nations and territories such as Singapore, Greenland,
-Mauritius, Cape Verde, Maldives, Seychelles, and many overseas territories.
-`merge_ne_supplement.py` merges the two datasets into a single GeoJSON
-(`adm2_render_supplemented.geojson`, 47 894 features) which the s2 and h3
-builders use as their source. Without this supplement those countries would
-return no result for any coordinate.
+GADM was chosen over alternatives like geoBoundaries because it has global
+coverage, consistent structure, and distinguishes country / adm1 / adm2
+cleanly at every level.
 
 
 ## The basemap (adm2_render.geojson)
 
-The map rendered in each UI is not tiles. It is a single GeoJSON file
-containing all 47 205 administrative boundaries, simplified to 0.01° (~1 km)
-tolerance, with integer feature IDs that match the geocoder's `admin_id`
-values.
+The map rendered in the UI is not tiles. It is a single GeoJSON file
+containing all 355 685 administrative boundaries simplified to 0.01° (~1 km)
+tolerance, with integer feature IDs matching the geocoder's `admin_id` values.
 
     geocoder.lookup(lat, lon)
            |
-           v returns admin_id  (integer 0–47204)
+           v  returns admin_id  (integer)
            |
     adminMap.get(admin_id)
            |
-           v returns { country, adm1, adm2 }  from GeoJSON properties
-
+           v  returns { country, adm1, adm2 }  from GeoJSON properties
 
 The GeoJSON is separate from the geocoding index because the geocoder only
 needs to return an integer — the names live in the basemap which is already
-loaded for rendering. This avoids duplicating name data in the binary.
+loaded for rendering.
 
 `make_render_geojson.py` builds it from the same prep binary used by the z0
-builder, so the feature IDs are guaranteed to match.
+builder, so feature IDs are guaranteed to match.
 
 
-## Architecture shared by all three UIs
+## Architecture
 
-Each UI loads two files at startup in parallel:
+The unified app (`ui/`) loads two files at startup in parallel:
 
     fetch("adm2_render.geojson")    fetch("*_geo.bin")
               |                              |
@@ -102,17 +96,15 @@ Each UI loads two files at startup in parallel:
               +------------- both ready -----+
                                    |
                               attach to map
-                         (layers: land, dividers, hl, hl-border)
 
-
-On every mousemove (via requestAnimationFrame to avoid redundant frames):
+On every mousemove (via requestAnimationFrame):
 
     mouse position
          |
          v
     map.unproject()  →  (lat, lng)
          |
-         +--→  geocoder.lookup(lat, lng)  →  admin_id / {names} / null
+         +--→  geocoder.lookup(lat, lng)  →  admin_id / null
          |           (timed with performance.now())
          |
          +--→  map.queryRenderedFeatures()  →  feature id for highlight
@@ -122,120 +114,127 @@ On every mousemove (via requestAnimationFrame to avoid redundant frames):
     ui.update(names, timing, coords)         ← floating tooltip
 
 
-The highlight is decoupled from the geocoder result so it always reflects the
-rendered map, even if the geocoder and GeoJSON were built from different data.
-
-
 ## Approach comparison
 
 All three read an in-memory binary blob fetched once at page load and answer
-every subsequent query in pure JavaScript with no network calls.
+every subsequent query in pure JavaScript.
 
 - **z0** uses a two-layer scheme: a coarse 0.25° grid covers ~97% of land
-  queries in a single array lookup, and a Morton-sorted boundary table handles
-  the rest. Lookup is typically < 1 µs.
-- **s2** packs H3 cells into compact 32-bit keys and organises them into
-  64-byte cache-line blocks for two-level binary search. Interior queries hit
-  the coarse (res-6) table; boundary queries fall through to the fine (res-7)
-  table.
-- **h3** stores raw 64-bit H3 cell IDs in a flat sorted array and binary-searches
-  with a three-resolution fallback (res 6 → 5 → 4). The 64-bit keys require
-  BigInt arithmetic in JavaScript but the implementation is the simplest of the
-  three.
+  queries in a single array lookup; a Morton-sorted boundary table handles
+  the rest. Typical lookup: < 2 µs.
+- **s2** packs S2 cells into compact 32-bit keys organised into 64-byte
+  cache-line blocks for two-level binary search. Consistent ~2 µs regardless
+  of location.
+- **h3** stores raw 64-bit H3 cell IDs in a flat sorted array and
+  binary-searches with a three-resolution fallback (res 6 → 5 → 4).
 
 <!-- prettier table -->
                  z0          s2          h3
     -----------------------------------------------
-    index size   11 MB       33 MB       10 MB
+    index size   20 MB       27 MB       13 MB
     interior     ~1.6 µs     ~1.9 µs     ~1.6 µs
     boundary     ~2.4 µs     ~1.9 µs     ~2.7 µs
     ocean        ~0.4 µs     ~2.6 µs     ~3.5 µs
     key type     uint32      uint32      uint64
-    key space    Morton      H3 compact  H3 raw
+    key space    Morton      S2 compact  H3 raw
     levels        2           2           1 + fallback
     builder      Zig         Python      Python
     JS BigInt?   no          no          yes
 
-Measured with `bench/bench.py` (5 000 iterations, 100 warmup, Apple Silicon):
-
-    city                               z0        s2        h3
-    ---------------------------------------------------------
-    São Paulo, Brazil               2.42µs    1.95µs    2.65µs
-    London, UK                      2.39µs    1.92µs    2.67µs
-    Tokyo, Japan                    1.53µs    2.82µs    2.68µs
-    Nairobi, Kenya                  1.59µs    1.92µs    1.60µs
-    Cairo, Egypt                    1.61µs    1.91µs    1.61µs
-    Sydney, Australia               1.54µs    1.93µs    1.62µs
-    Moscow, Russia                  1.65µs    1.95µs    1.63µs
-    Los Angeles, USA                2.41µs    1.85µs    2.77µs
-    Mumbai, India                   1.62µs    1.90µs    1.64µs
-    Cape Town, South Africa         1.64µs    1.90µs    2.77µs
-    Tripoint DE/FR/CH               1.61µs    1.90µs    1.62µs
-    Kaliningrad, Russia             2.43µs    1.92µs    2.77µs
-    Mid-Atlantic (ocean)            0.38µs    2.59µs    3.43µs
-    South Pacific (ocean)           0.39µs    2.62µs    3.50µs
-
 z0 exits early on ocean via the coarse grid (0.4 µs). s2 is the most
-consistent land geocoder (1.85–1.95 µs regardless of location) but pays
-~2.6 µs for ocean. h3 uses a three-resolution fallback so ocean costs
-~3.5 µs.
-
-See `bench/` for full methodology.
+consistent land geocoder but pays ~2.6 µs for ocean. h3 uses a fallback
+so ocean costs ~3.5 µs.
 
 
-## Accuracy
+## z0 binary format — RGEO0003
 
-Benchmarked against Nominatim (OpenStreetMap) ground truth on 56 major world
-cities + 3 ocean control points:
+    Header (64 bytes)
+      [0:8]   magic "RGEO0003"
+      [8:12]  format version (u32)
+      [12:16] build timestamp (u32)
+      [16:20] bitmap offset
+      [20:24] rank table offset
+      [24:28] values array offset
+      [28:32] land cell count
+      [32:36] Morton block offset
+      [36:40] Morton directory offset
+      [40:44] Morton record count
+      [44:48] Morton block count
+      [48:52] admin table offset
+      [52:56] name table offset
+      [56:64] reserved
 
-<!-- prettier table -->
-                 z0          s2          h3
-    -----------------------------------------------
-    correct      51 / 56     55 / 56     51 / 56
-    accuracy     91 %        98 %        91 %
+    Sections
+      bitmap       129 600 B   1-bit land/ocean flag per 0.25° cell
+      rank table     8 100 B   cumulative popcount every 512 bits
+      values        ~978 KB   u32 per land cell: admin_id or sentinel
+      Morton blocks ~14 MB    8 records × 8 B (u32 morton + u32 admin_id)
+      Morton dir    ~900 KB   u32 first-morton per block
+      admin table   ~2.8 MB   u16 country + u16 adm1 + u32 adm2 per entry
+      name table    ~1.4 MB   zstd-compressed JSON {countries,adm1s,adm2s}
 
-**s2** achieves 98% — only Istanbul is missed (the benchmark coordinate lands
-in an H3 cell whose centroid falls in the Bosphorus strait).
+    Sentinels
+      0xFFFFFFFF  BOUNDARY — Morton table lookup required
+      0xFFFFFFFE  OCEAN    — point in a coastal cell with no land polygon
 
-**z0** and **h3** miss 5 cities each.  z0 misses Singapore, Athens, Nuuk,
-Port Louis, and Praia — the 0.25° grid cell centroid falls in open water for
-each (narrow coastlines / small islands).  h3 shares the same root cause:
-Istanbul, Reykjavik, Auckland, Nuuk, and Praia all have their lookup cell
-centroid in water.
-
-All remaining misses are inherent to centroid-based spatial indexing on
-narrow peninsulas and small islands, not data gaps.
-
-Run `python bench/accuracy.py` to reproduce (uses cached Nominatim results).
-
-
-## Running
-
-```sh
-cd z0/ui && bun dev   # http://localhost:5174
-cd s2/ui && bun dev   # http://localhost:5175
-cd h3/ui && bun dev   # http://localhost:5176
-```
-
-Dependencies: `bun`, `zig` (for z0 builder), Python 3.10+ with `shapely`,
-`zstandard`, `h3`, `ijson`.
+    Morton quantisation: 12-bit (4096 steps per axis, ~2.4 km resolution)
+    Block size: 64 bytes = 8 records × 8 bytes, one L1 cache line
 
 
 ## Data pipeline
 
 ```sh
-# 1. Extract from GADM SQLite
-python extract_gadm.py gadm_4.1.gpkg gadm_adm2.geojson
+# 1. Extract finest admin level from GADM 4.1 GeoPackage
+python extract_gadm.py gadm_410.gpkg gadm_finest.geojson
+# → 355 697 features, ADM2–ADM5, with uid = finest GID
 
-# 2. Build each geocoder
-cd z0 && python prepare.py ../gadm_adm2.geojson z0_prep.bin
-        zig build -Drelease=true
-        ./zig-out/bin/builder z0_prep.bin z0_geo.bin
+# 2. Build z0 geocoder
+cd z0
+python prepare.py ../gadm_finest.geojson z0_prep_finest.bin
+# → 1.1 GB prep file, 355 685 admins, 475 157 polygon parts
 
-cd s2 && python builder.py ../gadm_adm2.geojson
-cd h3 && python builder.py ../gadm_adm2.geojson
-        python extract_names.py   # pre-extract names for browser
+zig build -Drelease=true
+./zig-out/bin/builder z0_prep_finest.bin z0_geo_finest.bin
+# → 19.7 MB RGEO0003 binary in ~32 s
 
-# 3. Build the render GeoJSON
-python make_render_geojson.py z0/z0_prep.bin z0/ui/public/data/adm2_render.geojson
+python query.py 48.8566 2.3522 z0_geo_finest.bin
+# → country: FRA  adm1: Paris, 6e arrondissement  adm2: Paris, 6e arrondissement
+
+# 3. Build render GeoJSON
+python make_render_geojson.py z0/z0_prep_finest.bin ui/public/data/adm2_render.geojson
+# → 126 MB simplified GeoJSON, 355 685 features
+
+# 4. Build s2 and h3 (unchanged from ADM2-level data)
+cd s2 && python builder.py gadm_adm2.geojson
+cd h3 && python builder.py gadm_adm2.geojson && python extract_names.py
 ```
+
+
+## Running locally
+
+```sh
+# Unified app (all three geocoders, selector on load)
+cd ui && bun install && bun dev   # http://localhost:5173
+
+# Standalone apps
+cd z0/ui && bun dev   # http://localhost:5174
+cd s2/ui && bun dev   # http://localhost:5175
+cd h3/ui && bun dev   # http://localhost:5176
+```
+
+Data files (`.bin`, `.geojson`) are served from `public/data/` symlinks in dev
+and from Cloudflare R2 in production. They are excluded from git (too large).
+
+Dependencies: `bun`, `zig 0.15`, Python 3.10+ with `shapely`, `zstandard`,
+`ijson`, `tqdm`.
+
+
+## UI features
+
+- **Hover tooltip** — flag, country, region, coordinates, lookup time
+- **Latency sparkline** — 40×12 px canvas showing last 30 query times
+- **Countries counter** — HUD count of unique countries visited this session
+- **Click-to-pin** — click to freeze the tooltip; click again to unpin
+- **Explore button** — ⟳ flies the map to a random land location
+- **Offline indicator** — green dot when geocoder is ready
+- **Progress bar** — loading progress for both data files in parallel
