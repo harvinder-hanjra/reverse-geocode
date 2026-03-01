@@ -150,6 +150,32 @@ every subsequent query in pure JavaScript with no network calls.
 See `bench/` for methodology and raw numbers.
 
 
+## Accuracy
+
+Benchmarked against Nominatim (OpenStreetMap) ground truth on 56 major world
+cities + 3 ocean control points:
+
+<!-- prettier table -->
+                 z0          s2          h3
+    -----------------------------------------------
+    correct      51 / 56     55 / 56     51 / 56
+    accuracy     91 %        98 %        91 %
+
+**s2** achieves 98% — only Istanbul is missed (the benchmark coordinate lands
+in an H3 cell whose centroid falls in the Bosphorus strait).
+
+**z0** and **h3** miss 5 cities each.  z0 misses Singapore, Athens, Nuuk,
+Port Louis, and Praia — the 0.25° grid cell centroid falls in open water for
+each (narrow coastlines / small islands).  h3 shares the same root cause:
+Istanbul, Reykjavik, Auckland, Nuuk, and Praia all have their lookup cell
+centroid in water.
+
+All remaining misses are inherent to centroid-based spatial indexing on
+narrow peninsulas and small islands, not data gaps.
+
+Run `python bench/accuracy.py` to reproduce (uses cached Nominatim results).
+
+
 ## Running
 
 ```sh
