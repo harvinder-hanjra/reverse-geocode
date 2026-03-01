@@ -10,9 +10,9 @@ Output format (z0_prep.bin):
     [8:12]  num_admins         u32 LE
     [12:16] num_polys          u32 LE  (total parts after MultiPolygon flattening)
     [16:20] name_zstd_len      u32 LE
-    [20:24] admin_table_len    u32 LE  (= num_admins * 5)
+    [20:24] admin_table_len    u32 LE  (= num_admins * 6)
     [24 : 24+name_zstd_len]   zstd-compressed JSON  {"countries":[...], "adm1s":[...], "adm2s":[...]}
-    [.. : ..+admin_table_len] admin table: [country_idx:u8, adm1_idx:u16, adm2_idx:u16] per entry
+    [.. : ..+admin_table_len] admin table: [country_idx:u16, adm1_idx:u16, adm2_idx:u16] per entry
     [.. : ]  polygon stream, for each polygon:
                admin_id:  u16 LE
                num_rings: u32 LE
@@ -57,8 +57,16 @@ def flatten_polygons(geom):
 
 
 def main():
-    geojson_path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/geoboundaries_adm2.geojson"
-    out_path = sys.argv[2] if len(sys.argv) > 2 else "z0_prep.bin"
+    # Parse args: prepare.py <input.geojson> [output] [--supplement <supp.geojson>]
+    import itertools
+    args = sys.argv[1:]
+    supp_path = None
+    if "--supplement" in args:
+        idx = args.index("--supplement")
+        supp_path = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
+    geojson_path = args[0] if args else "/tmp/geoboundaries_adm2.geojson"
+    out_path = args[1] if len(args) > 1 else "z0_prep.bin"
 
     print(f"Loading {geojson_path} …")
     # Use streaming parser for large files to avoid loading everything into RAM.
@@ -75,6 +83,12 @@ def main():
             data = json.load(f)
         features = data.get("features", [])
         print(f"  {len(features)} features")
+
+    if supp_path:
+        print(f"Appending supplement {supp_path} …")
+        with open(supp_path, encoding="utf-8") as f:
+            supp = json.load(f)
+        features = itertools.chain(features, supp.get("features", []))
 
     # Admin ID tables
     country_map, adm1_map, adm2_map = {}, {}, {}
@@ -98,14 +112,14 @@ def main():
             continue
 
         country = str(
-            props.get("shapeGroup") or props.get("GID_0") or
+            props.get("country") or props.get("shapeGroup") or props.get("GID_0") or
             props.get("ISO") or "UNK"
         ).strip()
         adm1 = str(
-            props.get("ADM1_NAME") or props.get("NAME_1") or ""
+            props.get("adm1") or props.get("ADM1_NAME") or props.get("NAME_1") or ""
         ).strip()
         adm2 = str(
-            props.get("shapeName") or props.get("NAME_2") or ""
+            props.get("adm2") or props.get("shapeName") or props.get("NAME_2") or ""
         ).strip()
 
         triple = (country, adm1, adm2)
@@ -141,9 +155,9 @@ def main():
     name_zstd = cctx.compress(name_json)
     print(f"  Name tables: {len(name_json):,} raw → {len(name_zstd):,} zstd")
 
-    # Admin table bytes: 5 bytes per entry
-    admin_bytes = b"".join(struct.pack("<BHH", c, a1, a2) for c, a1, a2 in admin_table)
-    assert len(admin_bytes) == len(admin_table) * 5
+    # Admin table bytes: 6 bytes per entry (uint16 × 3)
+    admin_bytes = b"".join(struct.pack("<HHH", c, a1, a2) for c, a1, a2 in admin_table)
+    assert len(admin_bytes) == len(admin_table) * 6
 
     print(f"Writing {out_path} …")
     with open(out_path, "wb") as f:

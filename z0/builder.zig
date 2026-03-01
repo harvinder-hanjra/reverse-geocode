@@ -395,15 +395,21 @@ fn buildCoarseGrid(alloc: Allocator, index: *const SpatialIndex) !CoarseGrid {
         const lat_c: f64 = 90.0 - (@as(f64, @floatFromInt(row)) + 0.5) * GRID_CELL_DEG;
         for (0..GRID_COLS) |col| {
             const lon_c: f64 = -180.0 + (@as(f64, @floatFromInt(col)) + 0.5) * GRID_CELL_DEG;
-            // Sample center first; fall back to 4 quadrant sub-centers so that
-            // coastal / island cells whose centroid falls in the ocean are still
-            // classified as land.  First hit wins (center takes priority).
-            const samples = [5][2]f64{
+            // Sample center first; fall back to inner quadrant sub-centers (Q=0.25×cell)
+            // and then near-corner samples (E=0.45×cell) so that narrow coastal
+            // polygons whose centroid falls in the ocean are still classified as land.
+            // First hit wins (center takes priority).
+            const E: f64 = GRID_CELL_DEG * 0.45; // ≈0.1125° — near cell corners
+            const samples = [9][2]f64{
                 .{ lon_c,     lat_c     },
                 .{ lon_c - Q, lat_c - Q },
                 .{ lon_c + Q, lat_c - Q },
                 .{ lon_c - Q, lat_c + Q },
                 .{ lon_c + Q, lat_c + Q },
+                .{ lon_c - E, lat_c - E },
+                .{ lon_c + E, lat_c - E },
+                .{ lon_c - E, lat_c + E },
+                .{ lon_c + E, lat_c + E },
             };
             for (samples) |pt| {
                 if (index.query(pt[0], pt[1])) |aid| {

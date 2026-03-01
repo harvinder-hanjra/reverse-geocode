@@ -4,23 +4,6 @@ pub fn build(b: *std.Build) void {
     const target   = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
 
-    // ── Native builder executable ────────────────────────────────────────────
-    const exe = b.addExecutable(.{
-        .name = "builder",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("builder.zig"),
-            .target   = target,
-            .optimize = optimize,
-        }),
-    });
-    b.installArtifact(exe);
-
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |run_args| run_cmd.addArgs(run_args);
-    const run_step = b.step("run", "Run the builder");
-    run_step.dependOn(&run_cmd.step);
-
     // ── Native query CLI ─────────────────────────────────────────────────────
     const query_exe = b.addExecutable(.{
         .name = "query",
@@ -32,7 +15,16 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(query_exe);
 
+    const run_cmd = b.addRunArtifact(query_exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |run_args| run_cmd.addArgs(run_args);
+    const run_step = b.step("run", "Run the query CLI");
+    run_step.dependOn(&run_cmd.step);
+
     // ── WASM geocoder module ─────────────────────────────────────────────────
+    // Exports: geocoder_init(ptr, len) i32, geocoder_lookup(hi, lo) i32
+    // JS caller computes H3 res-6 cell ID via h3-js and passes (hi32, lo32).
+    // The Zig module internally computes res-5 and res-4 parents via bit ops.
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
         .os_tag   = .freestanding,

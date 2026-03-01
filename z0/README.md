@@ -44,7 +44,7 @@ latitude and longitude, or roughly 28 km × 28 km at the equator).
                                                                   720 rows
 
 Each grid cell is classified at build time by running a point-in-polygon test
-against all 47 205 ADM2 polygons. The outcome for each cell is one of:
+against all 47 214 ADM2 polygons. The outcome for each cell is one of:
 
     0x0000–0xFFFD   admin_id  — cell is entirely inside one region
     0xFFFE          ocean     — no land polygon covers this cell
@@ -226,20 +226,30 @@ The builder is written in Zig for three reasons:
     56      reserved           8 bytes
 
     then: bitmap, rank table, values, Morton blocks, Morton dir,
-          admin table (5 bytes/admin), name tables (zstd JSON)
+          admin table (6 bytes/admin: u16 country_idx, u16 adm1_idx, u16 adm2_idx),
+    name tables (zstd JSON)
 
 
 ## Building
 
 ```sh
 cd z0
-python prepare.py <gadm_adm2.geojson> z0_prep.bin
+# Optionally create a supplement for countries missing from GADM:
+python make_supplement.py supplement.geojson
+
+python prepare.py <gadm_adm2.geojson> z0_prep.bin [--supplement supplement.geojson]
 zig build -Drelease=true
 ./zig-out/bin/builder z0_prep.bin z0_geo.bin
+
+# Build WASM module:
+zig build wasm
+# Output: zig-out/bin/geocoder.wasm (~1.5 KB)
 ```
 
 `prepare.py` converts the GeoJSON into a compact binary polygon stream that
 the Zig builder can process without a Python dependency at build time.
+The optional `--supplement` argument appends extra features (e.g., for small
+island nations absent from GADM) to improve coverage.
 
 
 ## Performance
@@ -250,5 +260,5 @@ the Zig builder can process without a Python dependency at build time.
     boundary (L1 hit)   ~1–2 µs
     ocean               ~100–200 ns  (bitmap bit test, early exit)
 
-    index file (47 205 regions)   11 MB
+    index file (47 214 regions)   11 MB
     prep binary (input to Zig)    1.1 GB  (raw polygon data, not committed)

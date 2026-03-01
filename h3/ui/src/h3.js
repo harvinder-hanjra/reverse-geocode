@@ -57,9 +57,10 @@ export class H3 {
   }
 
   _decode(packed) {
-    const cid = (packed >>> 24) & 0xFF;
-    const sid = (packed >>> 16) & 0xFF;
-    const did =  packed         & 0xFFFF;
+    // Bit layout: bits 31-22 = country_id (10 bits), 21-14 = state (8 bits), 13-0 = district (14 bits)
+    const cid = (packed >>> 22) & 0x3FF;
+    const sid = (packed >>> 14) & 0xFF;
+    const did =  packed         & 0x3FFF;
     const n   = this._names;
     return {
       country: n.countries[cid]       ?? '',

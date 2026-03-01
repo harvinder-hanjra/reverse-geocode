@@ -1,0 +1,9 @@
+// wasm_entry.zig — WASM module root for z0 geocoder.
+// Force-references the exported functions from query.zig so they survive DCE.
+// The `main()` in query.zig is unreferenced and not compiled for this target.
+const q = @import("query.zig");
+
+comptime {
+    _ = &q.geocoder_init;
+    _ = &q.geocoder_lookup;
+}
