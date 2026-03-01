@@ -14,7 +14,7 @@ Output format (z0_prep.bin):
     [24 : 24+name_zstd_len]   zstd-compressed JSON  {"countries":[...], "adm1s":[...], "adm2s":[...]}
     [.. : ..+admin_table_len] admin table: [country_idx:u16, adm1_idx:u16, adm2_idx:u16] per entry
     [.. : ]  polygon stream, for each polygon:
-               admin_id:  u16 LE
+               admin_id:  u32 LE
                num_rings: u32 LE
                for each ring:
                  num_pts: u32 LE
@@ -34,6 +34,7 @@ except ImportError:
     tqdm = None
 
 MAGIC = b"Z0PREP01"
+SIMPLIFY_TOL = 0.01  # degrees (~1 km); reduces vertex count ~10x
 
 
 def flatten_polygons(geom):
@@ -121,16 +122,16 @@ def main():
         adm2 = str(
             props.get("adm2") or props.get("shapeName") or props.get("NAME_2") or ""
         ).strip()
+        uid = str(props.get("uid") or "").strip()
 
-        triple = (country, adm1, adm2)
+        # Dedup key: include uid when present so finest-level features with the
+        # same name in different regions get separate admin_ids.
+        triple = (country, adm1, adm2, uid) if uid else (country, adm1, adm2)
         if triple not in admin_triple_map:
             c_idx = get_or_add(country_map, countries_list, country)
             a1_idx = get_or_add(adm1_map, adm1s_list, adm1)
             a2_idx = get_or_add(adm2_map, adm2s_list, adm2)
             admin_id = len(admin_table)
-            if admin_id > 0xFFFD:
-                skipped += 1
-                continue
             admin_triple_map[triple] = admin_id
             admin_table.append((c_idx, a1_idx, a2_idx))
 
@@ -140,6 +141,8 @@ def main():
             geom = shape(raw_geom)
             if not geom.is_valid:
                 geom = geom.buffer(0)
+            # Simplify before rasterisation: primary size-reduction lever.
+            geom = geom.simplify(SIMPLIFY_TOL, preserve_topology=True)
         except Exception:
             continue
 
@@ -167,10 +170,10 @@ def main():
         # Variable sections
         f.write(name_zstd)
         f.write(admin_bytes)
-        # Polygon stream
+        # Polygon stream (admin_id is now u32 to support >65k admins)
         for admin_id, poly in polys:
             rings = [poly.exterior] + list(poly.interiors)
-            f.write(struct.pack("<HI", admin_id, len(rings)))
+            f.write(struct.pack("<II", admin_id, len(rings)))
             for ring in rings:
                 coords = list(ring.coords)
                 # Drop closing duplicate vertex

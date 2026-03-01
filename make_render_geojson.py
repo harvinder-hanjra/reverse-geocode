@@ -85,7 +85,7 @@ def main():
     admin_polys = [[] for _ in range(num_admins)]
 
     for pi in progress(range(num_polys), total=num_polys, desc="parts"):
-        admin_id  = struct.unpack_from('<H', raw, pos)[0]; pos += 2
+        admin_id  = struct.unpack_from('<I', raw, pos)[0]; pos += 4
         num_rings = struct.unpack_from('<I', raw, pos)[0]; pos += 4
 
         rings = []
@@ -124,10 +124,10 @@ def main():
             skipped += 1
             continue
 
-        off   = admin_id * 5
-        c_idx  = struct.unpack_from('<B', admin_bytes, off)[0]
-        a1_idx = struct.unpack_from('<H', admin_bytes, off + 1)[0]
-        a2_idx = struct.unpack_from('<H', admin_bytes, off + 3)[0]
+        off    = admin_id * 6
+        c_idx  = struct.unpack_from('<H', admin_bytes, off)[0]
+        a1_idx = struct.unpack_from('<H', admin_bytes, off + 2)[0]
+        a2_idx = struct.unpack_from('<H', admin_bytes, off + 4)[0]
 
         features.append({
             "type": "Feature",

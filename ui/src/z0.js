@@ -1,18 +1,18 @@
 /**
  * z0.js — Offline reverse geocoder, browser runtime.
  *
- * Loads z0_geo.bin (RGEO0002) and exposes lookup(lat, lon) → admin_id | null.
+ * Loads z0_geo.bin (RGEO0003) and exposes lookup(lat, lon) → admin_id | null.
  * TypedArray views that may be at non-4-byte-aligned offsets (rank table,
  * Morton directory) are copied via slice() to guarantee alignment.
  */
 
 const GRID_COLS         = 1440;
 const GRID_ROWS         = 720;
-const SENTINEL_BOUNDARY = 0xFFFF;
-const SENTINEL_OCEAN    = 0xFFFE;
+const SENTINEL_BOUNDARY = 0xFFFFFFFF;
+const SENTINEL_OCEAN    = 0xFFFFFFFE;
 const BLOCK_SIZE        = 64;
-const BLOCK_RECORDS     = 10;
-const RECORD_SIZE       = 6;  // uint32 morton + uint16 admin_id
+const BLOCK_RECORDS     = 8;
+const RECORD_SIZE       = 8;  // uint32 morton + uint32 admin_id
 
 // Byte popcount lookup table
 const _PC8 = new Uint8Array(256);
@@ -38,7 +38,7 @@ export class Z0 {
     const dv = new DataView(buffer);
 
     const magic = String.fromCharCode(...new Uint8Array(buffer, 0, 8));
-    if (magic !== 'RGEO0002') throw new Error(`z0: bad magic "${magic}"`);
+    if (magic !== 'RGEO0003') throw new Error(`z0: bad magic "${magic}"`);
 
     // Header layout (uint32 LE, starting at byte 8):
     //  8  version    12  timestamp
@@ -65,8 +65,8 @@ export class Z0 {
     // Rank table: Uint32Array — offset may not be 4-byte aligned, so copy
     this._rank = new Uint32Array(buffer.slice(rankOff, rankOff + numRankBlocks * 4));
 
-    // Grid values: Uint16Array — offset may not be 2-byte aligned, so copy
-    this._values = new Uint16Array(buffer.slice(valuesOff, valuesOff + landCells * 2));
+    // Grid values: Uint32Array — offset may not be 4-byte aligned, so copy
+    this._values = new Uint32Array(buffer.slice(valuesOff, valuesOff + landCells * 4));
 
     // Morton directory: Uint32Array — copy to ensure alignment
     this._mDir = new Uint32Array(buffer.slice(mDirOff, mDirOff + mBlockCount * 4));
@@ -82,7 +82,7 @@ export class Z0 {
     this._rankAtCell = rankAtCell;
   }
 
-  /** Returns admin_id (0–65533) or null for ocean/unclassified. */
+  /** Returns admin_id or null for ocean/unclassified. */
   lookup(lat, lon) {
     lat = Math.max(-90,  Math.min(90,  lat));
     lon = Math.max(-180, Math.min(180, lon));
@@ -96,8 +96,8 @@ export class Z0 {
     if (rank < 0) return null;  // ocean
 
     const v = this._values[rank];
-    if (v === SENTINEL_OCEAN) return null;
-    if (v <= 0xFFFD)          return v;          // interior fast path
+    if (v === SENTINEL_OCEAN)    return null;
+    if (v <= 0xFFFFFFFD)         return v;        // interior fast path
 
     // Layer 1: Morton boundary table
     const m = _morton(lat, lon);
@@ -122,7 +122,7 @@ export class Z0 {
       const off = base + i * RECORD_SIZE;
       const rm  = dv.getUint32(off, true);
       if (rm > m)   break;
-      if (rm === m) return dv.getUint16(off + 4, true);
+      if (rm === m) return dv.getUint32(off + 4, true);
     }
     return null;
   }

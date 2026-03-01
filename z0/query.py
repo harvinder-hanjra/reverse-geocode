@@ -37,19 +37,19 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
-MAGIC = b"RGEO0002"
+MAGIC = b"RGEO0003"
 HEADER_SIZE = 64
 
 GRID_COLS = 1440
 GRID_ROWS = 720
 GRID_CELL_DEG = 0.25
 
-SENTINEL_BOUNDARY = 0xFFFF
-SENTINEL_OCEAN = 0xFFFE
+SENTINEL_BOUNDARY = 0xFFFFFFFF
+SENTINEL_OCEAN    = 0xFFFFFFFE
 
-BLOCK_RECORDS = 10
+BLOCK_RECORDS = 8
 BLOCK_SIZE = 64
-RECORD_SIZE = 6   # uint32 morton + uint16 admin_id
+RECORD_SIZE = 8   # uint32 morton + uint32 admin_id
 
 
 # ---------------------------------------------------------------------------
@@ -118,8 +118,8 @@ class ReverseGeocoder:
 
         # 2. Values array as numpy
         self._values_np = np.frombuffer(
-            mm[self._values_offset:self._values_offset + self._land_cell_count * 2],
-            dtype=np.uint16
+            mm[self._values_offset:self._values_offset + self._land_cell_count * 4],
+            dtype=np.uint32
         )
 
         # 3. Flat Morton arrays from blocks (skip 4-byte padding per 64-byte block)
@@ -130,13 +130,13 @@ class ReverseGeocoder:
             blocks = raw.reshape(bc, BLOCK_SIZE)
             rec = np.ascontiguousarray(blocks[:, :BLOCK_RECORDS * RECORD_SIZE].reshape(-1, RECORD_SIZE))
             mortons = np.frombuffer(np.ascontiguousarray(rec[:, :4]).tobytes(), dtype=np.uint32)
-            admins  = np.frombuffer(np.ascontiguousarray(rec[:, 4:]).tobytes(), dtype=np.uint16)
+            admins  = np.frombuffer(np.ascontiguousarray(rec[:, 4:]).tobytes(), dtype=np.uint32)
             n = self._morton_record_count
             self._morton_flat   = mortons[:n].copy()
             self._admin_flat    = admins[:n].copy()
         else:
             self._morton_flat = np.array([], dtype=np.uint32)
-            self._admin_flat  = np.array([], dtype=np.uint16)
+            self._admin_flat  = np.array([], dtype=np.uint32)
 
     # ------------------------------------------------------------------
     # Header parsing
@@ -241,9 +241,9 @@ class ReverseGeocoder:
         Layer 0 coarse grid lookup.
         Returns:
             None          — ocean (no land in this cell)
-            SENTINEL_OCEAN  (0xFFFE) — ocean within a land-flagged coastal cell
-            SENTINEL_BOUNDARY (0xFFFF) — boundary; caller must use Layer 1
-            int (0-0xFFFD) — interior; direct admin_id
+            SENTINEL_OCEAN  (0xFFFFFFFE) — ocean within a land-flagged coastal cell
+            SENTINEL_BOUNDARY (0xFFFFFFFF) — boundary; caller must use Layer 1
+            int (0-0xFFFFFFFD) — interior; direct admin_id
         """
         col = int((lon + 180.0) / GRID_CELL_DEG)
         row = int((90.0 - lat) / GRID_CELL_DEG)
@@ -261,8 +261,8 @@ class ReverseGeocoder:
         if not self._bitmap_bit(idx):
             return None
         rank = self._bitmap_rank(idx)
-        val_offset = self._values_offset + rank * 2
-        value = struct.unpack_from("<H", self._mm, val_offset)[0]
+        val_offset = self._values_offset + rank * 4
+        value = struct.unpack_from("<I", self._mm, val_offset)[0]
         return value
 
     # ------------------------------------------------------------------
@@ -290,7 +290,7 @@ class ReverseGeocoder:
 
         for i in range(BLOCK_RECORDS):
             rec_offset = block_offset + i * RECORD_SIZE
-            rec_morton, admin_id = struct.unpack_from("<IH", mm, rec_offset)
+            rec_morton, admin_id = struct.unpack_from("<II", mm, rec_offset)
 
             # Records are sorted; if we've passed morton, stop
             if rec_morton > morton:
@@ -375,11 +375,11 @@ class ReverseGeocoder:
         if grid_value == SENTINEL_OCEAN:
             return None  # ocean within coastal cell
 
-        if grid_value <= 0xFFFD:
+        if grid_value <= 0xFFFFFFFD:
             # Interior: fast path
             return self._get_admin(grid_value)
 
-        # BOUNDARY (0xFFFF): fall through to Layer 1
+        # BOUNDARY (0xFFFFFFFF): fall through to Layer 1
         admin_id = self._morton_lookup(lat, lon)
         if admin_id is None:
             return None

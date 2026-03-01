@@ -10,14 +10,14 @@ const Allocator = std.mem.Allocator;
 // Constants
 // ---------------------------------------------------------------------------
 
-const MAGIC_OUT = "RGEO0002";
+const MAGIC_OUT = "RGEO0003";
 const FORMAT_VERSION: u32 = 1;
 const GRID_COLS: usize = 1440;
 const GRID_ROWS: usize = 720;
 const GRID_CELLS: usize = GRID_COLS * GRID_ROWS;
 const GRID_CELL_DEG: f64 = 0.25;
-const SENTINEL_BOUNDARY: u16 = 0xFFFF;
-const BLOCK_RECORDS: usize = 10;
+const SENTINEL_BOUNDARY: u32 = 0xFFFFFFFF;
+const BLOCK_RECORDS: usize = 8;
 const BLOCK_SIZE: usize = 64;
 const BUCKET_DEG: f64 = 2.0;
 const BUCKET_COLS: usize = 180;
@@ -38,12 +38,12 @@ const MORTON_MAX: u32 = MORTON_STEPS - 1;
 const Ring = struct { pts: []const [2]f32 };
 
 const Polygon = struct {
-    admin_id: u16,
+    admin_id: u32,
     rings: []const Ring,
     bbox: [4]f32, // minlon, minlat, maxlon, maxlat
 };
 
-const MortonRecord = struct { morton: u32, admin_id: u16 };
+const MortonRecord = struct { morton: u32, admin_id: u32 };
 
 // Use a simple growable buffer rather than ArrayList to avoid API churn
 const Buf = struct {
@@ -261,7 +261,7 @@ const SpatialIndex = struct {
         self.alloc.free(self.pool);
     }
 
-    fn query(self: *const SpatialIndex, lon: f64, lat: f64) ?u16 {
+    fn query(self: *const SpatialIndex, lon: f64, lat: f64) ?u32 {
         const r: usize = @min(BUCKET_ROWS - 1, @as(usize, @intFromFloat(@max(0.0, (lat + 90.0) / BUCKET_DEG))));
         const c: usize = @min(BUCKET_COLS - 1, @as(usize, @intFromFloat(@max(0.0, (lon + 180.0) / BUCKET_DEG))));
         const bi = r * BUCKET_COLS + c;
@@ -338,7 +338,7 @@ fn readPrepFile(alloc: Allocator, path: []const u8) !PrepData {
     std.debug.print("  Reading {d} polygon parts …\n", .{num_polys});
     var last_pct: usize = 0;
     for (polys, 0..) |*poly, pi| {
-        poly.admin_id = ri16(raw, &pos);
+        poly.admin_id = ri32(raw, &pos);
         const num_rings = ri32(raw, &pos);
         const rings = try ca.alloc(Ring, num_rings);
         var bbox = [4]f32{ 1e9, 1e9, -1e9, -1e9 };
@@ -376,14 +376,14 @@ fn readPrepFile(alloc: Allocator, path: []const u8) !PrepData {
 const CoarseGrid = struct {
     bitmap: []u8,
     rank_table: []u32,
-    values: []u16,
+    values: []u32,
     boundary_cells: [][2]u16,
 };
 
 fn buildCoarseGrid(alloc: Allocator, index: *const SpatialIndex) !CoarseGrid {
     std.debug.print("  Classifying {d} coarse cells …\n", .{GRID_CELLS});
-    const OCEAN_SENTINEL: u16 = 0xFFFF;
-    const cell_admin = try alloc.alloc(u16, GRID_CELLS);
+    const OCEAN_SENTINEL: u32 = 0xFFFFFFFF;
+    const cell_admin = try alloc.alloc(u32, GRID_CELLS);
     defer alloc.free(cell_admin);
     @memset(cell_admin, OCEAN_SENTINEL);
 
@@ -431,7 +431,7 @@ fn buildCoarseGrid(alloc: Allocator, index: *const SpatialIndex) !CoarseGrid {
     const bitmap = try alloc.alloc(u8, bitmap_bytes);
     @memset(bitmap, 0);
 
-    var values = GrowSlice(u16).init(alloc);
+    var values = GrowSlice(u32).init(alloc);
     var boundary = GrowSlice([2]u16).init(alloc);
 
     for (0..GRID_ROWS) |row| {
@@ -667,9 +667,9 @@ fn packMortonBlocks(alloc: Allocator, records: []const MortonRecord) !PackedMort
         const s = bi * BLOCK_RECORDS;
         const e = @min(s + BLOCK_RECORDS, records.len);
         for (records[s..e], 0..) |rec, ri| {
-            const off = bi * BLOCK_SIZE + ri * 6;
+            const off = bi * BLOCK_SIZE + ri * 8;
             std.mem.writeInt(u32, block_data[off..][0..4], rec.morton, .little);
-            std.mem.writeInt(u16, block_data[off + 4 ..][0..2], rec.admin_id, .little);
+            std.mem.writeInt(u32, block_data[off + 4 ..][0..4], rec.admin_id, .little);
         }
     }
     return .{ .block_data = block_data, .directory = directory };
@@ -693,7 +693,7 @@ fn writeBinaryFile(
 
     const bitmap_bytes: u64 = grid.bitmap.len;
     const rank_bytes: u64 = grid.rank_table.len * 4;
-    const values_bytes: u64 = grid.values.len * 2;
+    const values_bytes: u64 = grid.values.len * 4;
     const block_bytes: u64 = pm.block_data.len;
     const dir_bytes: u64 = pm.directory.len * 4;
     const admin_len: u64 = admin_bytes.len;
@@ -732,7 +732,7 @@ fn writeBinaryFile(
     // Sections
     try out.append(grid.bitmap);
     for (grid.rank_table) |v| try out.wi32(v);
-    for (grid.values) |v| try out.wi16(v);
+    for (grid.values) |v| try out.wi32(v);
     try out.append(pm.block_data);
     for (pm.directory) |v| try out.wi32(v);
     try out.append(admin_bytes);
