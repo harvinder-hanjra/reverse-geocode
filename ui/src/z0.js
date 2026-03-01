@@ -131,5 +131,133 @@ export class Z0 {
 export async function loadZ0(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
-  return new Z0(await res.arrayBuffer());
+  return createZ0(await res.arrayBuffer());
+}
+
+// ── RGEO0004 ──────────────────────────────────────────────────────────────────
+// Palette+delta grouped stream. No admin/name tables (browser uses GeoJSON).
+// Values are u24 (3 bytes); sentinels 0xFFFFFF=BOUNDARY, 0xFFFFFE=OCEAN.
+
+export class Z0v4 {
+  constructor(buffer) {
+    const dv = new DataView(buffer);
+
+    const magic = String.fromCharCode(...new Uint8Array(buffer, 0, 8));
+    if (magic !== 'RGEO0004') throw new Error(`z0v4: bad magic "${magic}"`);
+
+    // Header (all u32 LE):
+    //  8  version   12  bitmapOff  16  rankOff   20  valuesOff
+    // 24  landCells 28  bndryIdxOff 32  streamOff 36  bndryCount
+    const bitmapOff   = dv.getUint32(12, true);
+    const rankOff     = dv.getUint32(16, true);
+    const valuesOff   = dv.getUint32(20, true);
+    const landCells   = dv.getUint32(24, true);
+    const bndryIdxOff = dv.getUint32(28, true);
+    const streamOff   = dv.getUint32(32, true);
+    const bndryCount  = dv.getUint32(36, true);
+
+    const bitmapBytes = Math.ceil(GRID_COLS * GRID_ROWS / 8);
+
+    this._buf8      = new Uint8Array(buffer);
+    this._streamOff = streamOff;
+
+    this._bitmap   = new Uint8Array(buffer, bitmapOff, bitmapBytes);
+    this._valBytes = new Uint8Array(buffer, valuesOff, landCells * 3);
+    this._bndryIdx = new Uint32Array(buffer.slice(bndryIdxOff, bndryIdxOff + bndryCount * 4));
+
+    // rank_cell[i] = land_rank for grid cell i, -1 for ocean
+    const cellCount  = GRID_COLS * GRID_ROWS;
+    const rankAtCell = new Int32Array(cellCount);
+    let r = 0;
+    for (let i = 0; i < cellCount; i++) {
+      rankAtCell[i] = (this._bitmap[i >> 3] >> (i & 7)) & 1 ? r++ : -1;
+    }
+    this._rankAtCell = rankAtCell;
+
+    // bndryRankAtLR[land_rank] = boundary_rank (index into bndryIdx), -1 if not boundary
+    const bndryRankAtLR = new Int32Array(landCells).fill(-1);
+    const vb = this._valBytes;
+    let br = 0;
+    for (let lr = 0; lr < landCells; lr++) {
+      const off3 = lr * 3;
+      const v = vb[off3] | (vb[off3 + 1] << 8) | (vb[off3 + 2] << 16);
+      if (v === 0xFFFFFF) bndryRankAtLR[lr] = br++;
+    }
+    this._bndryRankAtLR = bndryRankAtLR;
+  }
+
+  lookup(lat, lon) {
+    lat = Math.max(-90,  Math.min(90,  lat));
+    lon = Math.max(-180, Math.min(180, lon));
+
+    const col = Math.min(GRID_COLS - 1, Math.max(0, ((lon + 180) / 0.25) | 0));
+    const row = Math.min(GRID_ROWS - 1, Math.max(0, ((90 - lat)  / 0.25) | 0));
+    const lr  = this._rankAtCell[row * GRID_COLS + col];
+    if (lr < 0) return null;
+
+    const off3 = lr * 3;
+    const vb   = this._valBytes;
+    const v    = vb[off3] | (vb[off3 + 1] << 8) | (vb[off3 + 2] << 16);
+    if (v === 0xFFFFFE) return null;   // ocean sentinel
+    if (v  <  0xFFFFFE) return v;      // interior admin_id
+
+    // BOUNDARY: decode fine-resolution group
+    const br = this._bndryRankAtLR[lr];
+    if (br < 0) return null;
+    return this._decodeGroup(this._streamOff + this._bndryIdx[br], lat, lon);
+  }
+
+  _decodeGroup(absOff, lat, lon) {
+    const b = this._buf8;
+
+    // Header: base_lq u16 LE + base_aq u16 LE + pal_size u8 + rec_count u8
+    const baseLq   = b[absOff] | (b[absOff + 1] << 8);
+    const baseAq   = b[absOff + 2] | (b[absOff + 3] << 8);
+    const palSize  = b[absOff + 4];
+    const recCount = b[absOff + 5];
+    let off = absOff + 6;
+
+    if (palSize === 0 || recCount === 0) return null;
+
+    // Read palette (palSize × u24)
+    const palette = new Uint32Array(palSize);
+    for (let i = 0; i < palSize; i++) {
+      palette[i] = b[off] | (b[off + 1] << 8) | (b[off + 2] << 16);
+      off += 3;
+    }
+
+    // Compute local key for query point: key = (lq_off << 4) | aq_off
+    const lq    = ((lat + 90)  / 180 * 4096) & 0xFFF;
+    const aq    = ((lon + 180) / 360 * 4096) & 0xFFF;
+    const lqOff = lq - baseLq;
+    const aqOff = aq - baseAq;
+    if (lqOff < 0 || lqOff > 15 || aqOff < 0 || aqOff > 15) return null;
+    const queryKey = (lqOff << 4) | aqOff;
+
+    const idxBits = palSize <= 1 ? 0 : palSize <= 4 ? 2 : 4;
+
+    // Scan keys (rec_count × u8, sorted ascending)
+    let matchedR = -1;
+    for (let r = 0; r < recCount; r++) {
+      if (b[off + r] === queryKey) { matchedR = r; break; }
+    }
+    off += recCount;  // advance to idx bytes
+
+    if (matchedR < 0) return null;
+    if (idxBits === 0) return palette[0];
+
+    // MSB-first bit extraction
+    const bitStart = matchedR * idxBits;
+    const byteI    = bitStart >> 3;
+    const shift    = 8 - (bitStart & 7) - idxBits;
+    const mask     = (1 << idxBits) - 1;
+    const idx      = (b[off + byteI] >> shift) & mask;
+    return idx < palSize ? palette[idx] : palette[0];
+  }
+}
+
+/** Auto-detect RGEO0003 vs RGEO0004 and return the right geocoder. */
+export function createZ0(buffer) {
+  const magic = String.fromCharCode(...new Uint8Array(buffer, 0, 8));
+  return magic === 'RGEO0004' ? new Z0v4(buffer) : new Z0(buffer);
 }

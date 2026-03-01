@@ -10,7 +10,7 @@
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
-import { Z0 } from './z0.js';
+import { createZ0 } from './z0.js';
 import { S2 } from './s2.js';
 import { H3 } from './h3.js';
 import { UI } from './ui.js';
@@ -124,7 +124,7 @@ async function fetchBuffer(url, onProgress) {
 
 // ── Data URL ──────────────────────────────────────────────────────────────────
 const DATA = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
-  ? '/data'
+  ? `${import.meta.env.BASE_URL}data`
   : 'https://pub-4ad65c005bad4ef08b4bca5befc474b8.r2.dev';
 
 // ── Load data based on chosen geocoder ───────────────────────────────────────
@@ -160,7 +160,7 @@ for (const f of gj.features) f.properties._c = countryFill(f.properties.country)
 geojson  = gj;
 adminMap = new Map(gj.features.map(f => [f.id, f.properties]));
 
-if (geoType === 'z0')      geocoder = new Z0(bin);
+if (geoType === 'z0')      geocoder = createZ0(bin);
 else if (geoType === 's2') geocoder = new S2(bin);
 else                       geocoder = new H3(bin, names);
 
