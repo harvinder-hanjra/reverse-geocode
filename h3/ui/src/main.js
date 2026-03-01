@@ -8,7 +8,7 @@
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
-import { loadH3 } from './h3.js';
+import { H3 } from './h3.js';
 import { UI } from './ui.js';
 
 // ── Service Worker ─────────────────────────────────────────────────────────
@@ -49,16 +49,53 @@ let rafPending = false;
 let pendingX  = 0;
 let pendingY  = 0;
 
+// ── Progress bar ─────────────────────────────────────────────────────────────
+const _fill = document.getElementById('progress-fill');
+function setProgress(pct) {
+  _fill.style.width = `${(pct * 100).toFixed(1)}%`;
+}
+
+async function fetchBuffer(url, onProgress) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`fetch ${url}: ${res.status}`);
+  const total = Number(res.headers.get('content-length') || 0);
+  const reader = res.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    onProgress(received, total || received);
+  }
+  const out = new Uint8Array(received);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out.buffer;
+}
+
 // ── Data URLs — local in dev, GitHub release in production ─────────────────
 const DATA = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
   ? '/data'
   : 'https://pub-4ad65c005bad4ef08b4bca5befc474b8.r2.dev';
 
 // ── Load data ──────────────────────────────────────────────────────────────
+const prog = [{ r: 0, t: 0 }, { r: 0, t: 0 }, { r: 0, t: 0 }];
+function updateBar() {
+  const r = prog[0].r + prog[1].r + prog[2].r;
+  const t = prog[0].t + prog[1].t + prog[2].t;
+  if (t > 0) setProgress(r / t);
+}
+
 Promise.all([
-  fetch(`${DATA}/adm2_render.geojson`).then(r => r.json()),
-  loadH3(`${DATA}/h3_geo.bin`, `${DATA}/h3_names.json`),
-]).then(([gj, h3inst]) => {
+  fetchBuffer(`${DATA}/adm2_render.geojson`, (r, t) => { prog[0] = { r, t }; updateBar(); })
+    .then(buf => JSON.parse(new TextDecoder().decode(buf))),
+  fetchBuffer(`${DATA}/h3_geo.bin`, (r, t) => { prog[1] = { r, t }; updateBar(); }),
+  fetchBuffer(`${DATA}/h3_names.json`, (r, t) => { prog[2] = { r, t }; updateBar(); })
+    .then(buf => JSON.parse(new TextDecoder().decode(buf))),
+]).then(([gj, h3buf, names]) => {
+  const h3inst = new H3(h3buf, names);
   for (const f of gj.features) f.properties._c = countryFill(f.properties.country);
   geojson  = gj;
   h3geo    = h3inst;
