@@ -167,8 +167,8 @@ class ReverseGeocoder:
             _reserved,
         ) = struct.unpack_from("<IIIIIIIIIIIIq", mm, 8)
 
-        # Cache admin table length: each entry is 6 bytes (uint16 × 3)
-        self._admin_entry_size = 6
+        # Cache admin table length: each entry is 8 bytes (u16 country, u16 adm1, u32 adm2)
+        self._admin_entry_size = 8
         # Derive admin count from name_offset - admin_offset
         admin_section_len = self._name_offset - self._admin_offset
         self._admin_count = admin_section_len // self._admin_entry_size
@@ -342,7 +342,7 @@ class ReverseGeocoder:
     def _get_admin(self, admin_id: int) -> dict:
         """Return dict with country, adm1, adm2 strings for admin_id."""
         offset = self._admin_offset + admin_id * self._admin_entry_size
-        c_idx, a1_idx, a2_idx = struct.unpack_from("<HHH", self._mm, offset)
+        c_idx, a1_idx, a2_idx = struct.unpack_from("<HHI", self._mm, offset)
         return {
             "country": self._countries[c_idx],
             "adm1": self._adm1s[a1_idx],

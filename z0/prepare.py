@@ -10,9 +10,9 @@ Output format (z0_prep.bin):
     [8:12]  num_admins         u32 LE
     [12:16] num_polys          u32 LE  (total parts after MultiPolygon flattening)
     [16:20] name_zstd_len      u32 LE
-    [20:24] admin_table_len    u32 LE  (= num_admins * 6)
+    [20:24] admin_table_len    u32 LE  (= num_admins * 8)
     [24 : 24+name_zstd_len]   zstd-compressed JSON  {"countries":[...], "adm1s":[...], "adm2s":[...]}
-    [.. : ..+admin_table_len] admin table: [country_idx:u16, adm1_idx:u16, adm2_idx:u16] per entry
+    [.. : ..+admin_table_len] admin table: [country_idx:u16, adm1_idx:u16, adm2_idx:u32] per entry
     [.. : ]  polygon stream, for each polygon:
                admin_id:  u32 LE
                num_rings: u32 LE
@@ -34,7 +34,6 @@ except ImportError:
     tqdm = None
 
 MAGIC = b"Z0PREP01"
-SIMPLIFY_TOL = 0.01  # degrees (~1 km); reduces vertex count ~10x
 
 
 def flatten_polygons(geom):
@@ -142,7 +141,6 @@ def main():
             if not geom.is_valid:
                 geom = geom.buffer(0)
             # Simplify before rasterisation: primary size-reduction lever.
-            geom = geom.simplify(SIMPLIFY_TOL, preserve_topology=True)
         except Exception:
             continue
 
@@ -158,9 +156,10 @@ def main():
     name_zstd = cctx.compress(name_json)
     print(f"  Name tables: {len(name_json):,} raw → {len(name_zstd):,} zstd")
 
-    # Admin table bytes: 6 bytes per entry (uint16 × 3)
-    admin_bytes = b"".join(struct.pack("<HHH", c, a1, a2) for c, a1, a2 in admin_table)
-    assert len(admin_bytes) == len(admin_table) * 6
+    # Admin table bytes: 8 bytes per entry (u16 country, u16 adm1, u32 adm2)
+    # adm2 uses u32 because finest-level datasets can have >65535 unique names.
+    admin_bytes = b"".join(struct.pack("<HHI", c, a1, a2) for c, a1, a2 in admin_table)
+    assert len(admin_bytes) == len(admin_table) * 8
 
     print(f"Writing {out_path} …")
     with open(out_path, "wb") as f:

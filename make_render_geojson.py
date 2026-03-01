@@ -124,10 +124,10 @@ def main():
             skipped += 1
             continue
 
-        off    = admin_id * 6
+        off    = admin_id * 8
         c_idx  = struct.unpack_from('<H', admin_bytes, off)[0]
         a1_idx = struct.unpack_from('<H', admin_bytes, off + 2)[0]
-        a2_idx = struct.unpack_from('<H', admin_bytes, off + 4)[0]
+        a2_idx = struct.unpack_from('<I', admin_bytes, off + 4)[0]
 
         features.append({
             "type": "Feature",
