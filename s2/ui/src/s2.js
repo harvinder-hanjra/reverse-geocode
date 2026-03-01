@@ -14,12 +14,14 @@ const RECORD_SIZE      = 6;    // uint32 cell_id + uint16 admin_id
 const BLOCK_SIZE       = 64;   // bytes — one cache line
 const HEADER_SIZE      = 64;   // bytes
 
-function _encodeRes6(h3BigInt) {
-  return Number((h3BigInt >> 27n) & 0x1FFFFFFn);
+// enc6 = bits [51:27] of the 64-bit H3 id = hi20<<5 | lo>>27
+function _encodeRes6(hi, lo) {
+  return ((hi & 0xFFFFF) * 32 + (lo >>> 27)) >>> 0;
 }
 
-function _encodeRes7(h3BigInt) {
-  return Number((h3BigInt >> 24n) & 0xFFFFFFFn);
+// enc7 = bits [51:24] of the 64-bit H3 id = hi20<<8 | lo>>24
+function _encodeRes7(hi, lo) {
+  return ((hi & 0xFFFFF) * 256 + (lo >>> 24)) >>> 0;
 }
 
 export class S2 {
@@ -48,12 +50,16 @@ export class S2 {
   /** Returns admin_id (uint16) or null for ocean/unclassified. */
   lookup(lat, lon) {
     const cell7Str = h3lib.latLngToCell(lat, lon, 7);
-    const cell7Int = BigInt('0x' + cell7Str);
-    const enc7     = _encodeRes7(cell7Int);
+    const p7  = cell7Str.padStart(16, '0');
+    const h7  = parseInt(p7.slice(0, 8), 16);
+    const l7  = parseInt(p7.slice(8),    16);
+    const enc7 = _encodeRes7(h7, l7);
 
     const cell6Str = h3lib.cellToParent(cell7Str, 6);
-    const cell6Int = BigInt('0x' + cell6Str);
-    const enc6     = _encodeRes6(cell6Int);
+    const p6  = cell6Str.padStart(16, '0');
+    const h6  = parseInt(p6.slice(0, 8), 16);
+    const l6  = parseInt(p6.slice(8),    16);
+    const enc6 = _encodeRes6(h6, l6);
 
     // L10 table (coarse, ~63% of land queries)
     let id = this._blockSearch(enc6, this._l10BlocksOff, this._l10DirOff, this._l10BlockCount);

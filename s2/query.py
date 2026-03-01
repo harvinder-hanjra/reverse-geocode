@@ -55,6 +55,12 @@ from typing import Dict, Optional
 import h3
 import zstandard as zstd
 
+try:
+    import numpy as np
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
 # ── Constants (must match builder.py exactly) ────────────────────────────────
 
 MAGIC             = b"RGEO0001"
@@ -102,6 +108,8 @@ class ReverseGeocoder:
         self._mm   = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
         self._parse_header()
         self._load_names()
+        if _HAS_NUMPY:
+            self._build_numpy_tables()
 
     def close(self) -> None:
         """Release the mmap and file handle."""
@@ -164,6 +172,26 @@ class ReverseGeocoder:
         self._adm1s:     list = data["adm1"]
         self._adm2s:     list = data["adm2"]
 
+    # ── Numpy fast-path tables ───────────────────────────────────────────────
+
+    def _build_numpy_tables(self):
+        mm = self._mm
+        self._l10_cells_np, self._l10_admins_np = self._extract_flat(
+            mm, self._l10_blocks_off, self._l10_block_count, self._l10_count)
+        self._l12_cells_np, self._l12_admins_np = self._extract_flat(
+            mm, self._l12_blocks_off, self._l12_block_count, self._l12_count)
+
+    def _extract_flat(self, mm, blocks_off, block_count, record_count):
+        if block_count == 0 or record_count == 0:
+            return np.array([], dtype=np.uint32), np.array([], dtype=np.uint16)
+        total = block_count * BLOCK_SIZE
+        raw = np.frombuffer(mm[blocks_off:blocks_off + total], dtype=np.uint8)
+        blocks = raw.reshape(block_count, BLOCK_SIZE)
+        rec = np.ascontiguousarray(blocks[:, :RECORDS_PER_BLOCK * RECORD_SIZE].reshape(-1, RECORD_SIZE))
+        cells  = np.frombuffer(np.ascontiguousarray(rec[:, :4]).tobytes(), dtype=np.uint32)
+        admins = np.frombuffer(np.ascontiguousarray(rec[:, 4:]).tobytes(), dtype=np.uint16)
+        return cells[:record_count].copy(), admins[:record_count].copy()
+
     # ── Admin table ──────────────────────────────────────────────────────────
 
     def _lookup_admin(self, admin_id: int) -> Dict[str, str]:
@@ -185,51 +213,47 @@ class ReverseGeocoder:
         dir_off: int,
         block_count: int,
     ) -> Optional[int]:
-        """
-        Two-phase lookup:
-          Phase 1 — Binary search the directory array (uint32 first-keys).
-                    Find the last block whose first key is <= cell_id.
-          Phase 2 — Linear scan within that 64-byte block.
-                    Return admin_id if cell_id is found, else None.
-
-        The directory array fits comfortably in CPU L2 cache at steady state.
-        The block read is a single cache-line load.
-        """
-        if block_count == 0:
+        if _HAS_NUMPY and hasattr(self, '_l10_cells_np'):
+            # Select which table based on blocks_off
+            if blocks_off == self._l10_blocks_off:
+                cells, admins = self._l10_cells_np, self._l10_admins_np
+            else:
+                cells, admins = self._l12_cells_np, self._l12_admins_np
+            # Must pass np.uint32 — passing a Python int to a uint32 array
+            # triggers Python-level fallback comparisons (250x slower).
+            uid = np.uint32(cell_id)
+            pos = int(np.searchsorted(cells, uid))
+            if pos < len(cells) and cells[pos] == uid:
+                return int(admins[pos])
             return None
 
+        # original fallback ...
+        if block_count == 0:
+            return None
         mm = self._mm
-
-        # Phase 1: binary search over directory entries
         lo, hi = 0, block_count - 1
-        best   = -1
+        best = -1
         while lo <= hi:
             mid = (lo + hi) >> 1
             first_key, = struct.unpack_from("<I", mm, dir_off + mid * 4)
             if first_key <= cell_id:
                 best = mid
-                lo   = mid + 1
+                lo = mid + 1
             else:
-                hi   = mid - 1
-
+                hi = mid - 1
         if best < 0:
-            return None  # cell_id is below the first block's first key
-
-        # Phase 2: linear scan within the identified block
+            return None
         block_start = blocks_off + best * BLOCK_SIZE
         for i in range(RECORDS_PER_BLOCK):
             rec_off = block_start + i * RECORD_SIZE
             rec_cell, = struct.unpack_from("<I", mm, rec_off)
             if rec_cell == 0 and i > 0:
-                # Padding sentinel at end of under-full block; stop.
                 break
             if rec_cell == cell_id:
                 admin_id, = struct.unpack_from("<H", mm, rec_off + 4)
                 return admin_id
             if rec_cell > cell_id:
-                # Records are sorted; we've passed the target.
                 break
-
         return None
 
     # ── Public API ───────────────────────────────────────────────────────────

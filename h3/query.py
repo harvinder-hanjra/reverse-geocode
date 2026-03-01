@@ -23,6 +23,12 @@ from typing import Optional
 import zstandard as zstd
 import h3
 
+try:
+    import numpy as np
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
 
 # ---------------------------------------------------------------------------
 # File-format constants  (must match builder.py exactly)
@@ -136,11 +142,33 @@ class ReverseGeocoder:
 
         self._view = _RecordView(self._records, n_records)
 
+        if _HAS_NUMPY:
+            self._build_numpy_tables()
+
         # --- load and decompress name table ---------------------------------
         name_blob = self._mm[name_table_off:]
         dctx = zstd.ZstdDecompressor()
         name_json = dctx.decompress(bytes(name_blob))
         self._names = json.loads(name_json)
+
+    # -- Numpy fast-path tables ----------------------------------------------
+
+    def _build_numpy_tables(self):
+        n = self._n
+        # Parse 12-byte records: [uint64 h3_id][uint32 meta]
+        # Use custom dtype with explicit itemsize to avoid alignment padding
+        raw = np.frombuffer(self._records, dtype=np.uint8).reshape(n, RECORD_SIZE)
+        id_bytes   = np.ascontiguousarray(raw[:, :H3_INDEX_SIZE])
+        meta_bytes = np.ascontiguousarray(raw[:, H3_INDEX_SIZE:])
+        self._h3_ids_np = np.frombuffer(id_bytes.tobytes(),   dtype=np.uint64)
+        self._metas_np  = np.frombuffer(meta_bytes.tobytes(), dtype=np.uint32)
+
+    def _search_np(self, cell_id):
+        uid = np.uint64(cell_id)
+        pos = int(np.searchsorted(self._h3_ids_np, uid))
+        if pos < self._n and self._h3_ids_np[pos] == uid:
+            return int(self._metas_np[pos])
+        return None
 
     # -- Core lookup ---------------------------------------------------------
 
@@ -164,7 +192,7 @@ class ReverseGeocoder:
                 cell_str = h3.cell_to_parent(cell_str, res)
                 cell_int = int(cell_str, 16)
 
-            meta = self._search(cell_int)
+            meta = self._search_np(cell_int) if (_HAS_NUMPY and hasattr(self, '_h3_ids_np')) else self._search(cell_int)
             if meta is not None:
                 return self._decode_meta(meta)
 

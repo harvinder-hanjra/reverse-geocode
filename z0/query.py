@@ -19,6 +19,19 @@ from typing import Optional
 
 import zstandard as zstd
 
+try:
+    import numpy as np
+    _HAS_NUMPY = True
+    # Pre-compute spread table for 12-bit Morton encoding
+    _SPREAD12 = np.zeros(4096, dtype=np.uint32)
+    for _v in range(4096):
+        _r = 0
+        for _i in range(12):
+            _r |= ((_v >> _i) & 1) << (2 * _i)
+        _SPREAD12[_v] = _r
+except ImportError:
+    _HAS_NUMPY = False
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -76,6 +89,8 @@ class ReverseGeocoder:
         self._mm = mmap.mmap(self._f.fileno(), 0, access=mmap.ACCESS_READ)
         self._parse_header()
         self._load_name_tables()
+        if _HAS_NUMPY:
+            self._build_numpy_tables()
 
     def close(self):
         self._mm.close()
@@ -86,6 +101,42 @@ class ReverseGeocoder:
 
     def __exit__(self, *args):
         self.close()
+
+    # ------------------------------------------------------------------
+    # Numpy fast-path tables
+    # ------------------------------------------------------------------
+
+    def _build_numpy_tables(self):
+        mm = self._mm
+        bitmap_bytes = (GRID_COLS * GRID_ROWS + 7) // 8
+
+        # 1. Cumulative rank: rank_cell[i] = index in values[], -1 for ocean
+        bitmap_arr = np.frombuffer(mm[self._bitmap_offset:self._bitmap_offset + bitmap_bytes], dtype=np.uint8)
+        bits = np.unpackbits(bitmap_arr, bitorder='little').astype(np.int32)
+        cumsum = np.cumsum(bits, dtype=np.int32)
+        self._rank_cell = np.where(bits == 1, cumsum - 1, -1).astype(np.int32)
+
+        # 2. Values array as numpy
+        self._values_np = np.frombuffer(
+            mm[self._values_offset:self._values_offset + self._land_cell_count * 2],
+            dtype=np.uint16
+        )
+
+        # 3. Flat Morton arrays from blocks (skip 4-byte padding per 64-byte block)
+        bc = self._morton_block_count
+        if bc > 0:
+            total = bc * BLOCK_SIZE
+            raw = np.frombuffer(mm[self._morton_block_offset:self._morton_block_offset + total], dtype=np.uint8)
+            blocks = raw.reshape(bc, BLOCK_SIZE)
+            rec = np.ascontiguousarray(blocks[:, :BLOCK_RECORDS * RECORD_SIZE].reshape(-1, RECORD_SIZE))
+            mortons = np.frombuffer(np.ascontiguousarray(rec[:, :4]).tobytes(), dtype=np.uint32)
+            admins  = np.frombuffer(np.ascontiguousarray(rec[:, 4:]).tobytes(), dtype=np.uint16)
+            n = self._morton_record_count
+            self._morton_flat   = mortons[:n].copy()
+            self._admin_flat    = admins[:n].copy()
+        else:
+            self._morton_flat = np.array([], dtype=np.uint32)
+            self._admin_flat  = np.array([], dtype=np.uint16)
 
     # ------------------------------------------------------------------
     # Header parsing
@@ -196,18 +247,20 @@ class ReverseGeocoder:
         """
         col = int((lon + 180.0) / GRID_CELL_DEG)
         row = int((90.0 - lat) / GRID_CELL_DEG)
-
-        # Clamp to valid range
         col = max(0, min(GRID_COLS - 1, col))
         row = max(0, min(GRID_ROWS - 1, row))
-
         idx = row * GRID_COLS + col
 
-        if not self._bitmap_bit(idx):
-            return None  # ocean — fast path
+        if _HAS_NUMPY and hasattr(self, '_rank_cell'):
+            rank = int(self._rank_cell[idx])
+            if rank < 0:
+                return None  # ocean
+            return int(self._values_np[rank])
 
+        # original fallback ...
+        if not self._bitmap_bit(idx):
+            return None
         rank = self._bitmap_rank(idx)
-        # Read value: rank-th uint16 in the values array (0-based)
         val_offset = self._values_offset + rank * 2
         value = struct.unpack_from("<H", self._mm, val_offset)[0]
         return value
@@ -256,6 +309,23 @@ class ReverseGeocoder:
         Layer 1 Morton boundary table lookup with parent fallback.
         Returns admin_id or None.
         """
+        if _HAS_NUMPY and hasattr(self, '_morton_flat'):
+            lq = int((lat + 90.0) / 180.0 * MORTON_STEPS) & (MORTON_STEPS - 1)
+            aq = int((lon + 180.0) / 360.0 * MORTON_STEPS) & (MORTON_STEPS - 1)
+            # Keep as numpy uint32 — passing a Python int to searchsorted on a
+            # uint32 array triggers Python-level comparisons (250x slower).
+            morton = _SPREAD12[lq] | (_SPREAD12[aq] << 1)  # numpy uint32
+
+            pos = int(np.searchsorted(self._morton_flat, morton))
+            if pos < len(self._morton_flat) and self._morton_flat[pos] == morton:
+                return int(self._admin_flat[pos])
+            morton_parent = morton >> np.uint32(2)           # numpy uint32
+            pos = int(np.searchsorted(self._morton_flat, morton_parent))
+            if pos < len(self._morton_flat) and self._morton_flat[pos] == morton_parent:
+                return int(self._admin_flat[pos])
+            return None
+
+        # original fallback
         morton = compute_morton(lat, lon)
         admin_id = self._block_search(morton)
         if admin_id is not None:
@@ -263,8 +333,7 @@ class ReverseGeocoder:
 
         # Parent fallback: mask out bottom 2 bits
         morton_parent = morton >> 2
-        admin_id = self._block_search(morton_parent)
-        return admin_id
+        return self._block_search(morton_parent)
 
     # ------------------------------------------------------------------
     # Admin table lookup

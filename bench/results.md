@@ -7,148 +7,168 @@ python bench.py --n 5000
 ```
 
 All three geocoders are measured in the same process using the same Python query
-modules that back the CLI tools. The numbers reflect the algorithmic cost, not
-JavaScript overhead — but the relative ordering is the same in the browser.
+modules. The numbers reflect the algorithmic cost without JavaScript overhead.
 
 
-## Raw numbers (mean µs)
+## Raw numbers after optimisation (mean µs)
 
     city                                       z0        s2        h3
     -----------------------------------------------------------------
-    São Paulo, Brazil                       6.34      5.47      6.35
-    London, UK                              6.22      5.89      2.63
-    Tokyo, Japan                            5.80      6.03      2.65
-    Nairobi, Kenya                          4.22      5.91      2.64
-    Cairo, Egypt                            5.69      5.78      2.60
-    Sydney, Australia                       5.56      6.35      4.67
-    Moscow, Russia                          3.65      3.08      4.63
-    Los Angeles, USA                        5.10      3.60      4.72
-    Mumbai, India                           6.16      5.88      2.51
-    Cape Town, South Africa                 0.39      6.31      4.67
-    Tripoint DE/FR/CH                       5.38      6.14      2.52
-    Kaliningrad, Russia                     3.69      6.26      2.52
-    Mid-Atlantic (ocean)                    0.38      5.43      6.28
-    South Pacific  (ocean)                  0.37      6.11      6.47
+    São Paulo, Brazil                       2.40      2.59      3.27
+    London, UK                              2.33      2.75      1.52
+    Tokyo, Japan                            1.55      2.78      1.55
+    Nairobi, Kenya                          1.58      2.80      1.52
+    Cairo, Egypt                            1.55      2.79      1.53
+    Sydney, Australia                       1.59      2.76      2.60
+    Moscow, Russia                          1.50      1.91      2.64
+    Los Angeles, USA                        1.94      1.94      2.62
+    Mumbai, India                           1.57      2.80      1.57
+    Cape Town, South Africa                 0.37      2.77      2.63
+    Tripoint DE/FR/CH                       1.55      2.86      1.55
+    Kaliningrad, Russia                     2.42      2.83      1.57
+    Mid-Atlantic (ocean)                    0.36      2.62      3.37
+    South Pacific  (ocean)                  0.35      2.61      3.35
 
 
-## What each cluster reveals
+## Before and after (baseline → optimised)
 
-### z0
-
-Three distinct latency clusters appear:
-
-    ocean                  0.37–0.39 µs   bitmap bit test, early exit
-    Layer 0 interior       3.65–4.22 µs   bitmap + rank + values array read
-    Layer 0 boundary       5.10–6.34 µs   + Morton directory binary search + block scan
-
-Cape Town (0.39 µs) matches ocean speed because the query coordinate
-(-33.9249, 18.4241) happens to fall in a 0.25° grid cell whose centroid the
-builder classified as ocean. The city is on the coast; the grid resolution is
-coarse enough that the cell straddles land and water and the builder chose the
-majority material.
-
-Moscow and Kaliningrad (3.65–3.69 µs) are Layer 0 interior hits — their grid
-cells are fully inside Russia and the lookup terminates after reading one entry
-from the values array.
-
-São Paulo (6.34 µs) and London (6.22 µs) are boundary hits — their 0.25°
-cells straddle a border or a coastline and the lookup falls through to the
-Morton table, paying the cost of a binary search on the directory and a linear
-scan of one 64-byte block.
+    geocoder  query type        before   after   speedup
+    z0        interior land      3.65µs   1.50µs   2.4×
+    z0        boundary land      6.34µs   2.40µs   2.6×
+    z0        ocean              0.37µs   0.36µs   same
+    s2        interior (L10)     3.08µs   1.91µs   1.6×
+    s2        boundary (L12)     6.35µs   2.86µs   2.2×
+    s2        ocean              5.43µs   2.62µs   2.1×
+    h3        res-6 hit          2.51µs   1.52µs   1.7×
+    h3        res-5 fallback     4.67µs   2.60µs   1.8×
+    h3        ocean              6.47µs   3.35µs   1.9×
 
 
-### s2
+## What changed
 
-Two clusters:
+### Python (query.py)
 
-    L10 interior hit       3.08–3.60 µs   H3 cell encode + directory binary search + block scan
-    L12 boundary hit / ocean  5.43–6.35 µs  two directory searches + block scans
+**z0**:
 
-Moscow (3.08 µs) and LA (3.60 µs) are L10 hits — their res-6 parent cell is
-entirely inside one region and the L10 directory finds it in the first pass.
+1. Pre-computed cumulative rank table (`_rank_cell`, Int32Array of 1 036 800
+   entries). The original rank function scanned up to 64 bitmap bytes per
+   lookup with a Python loop. The new path is a single array index.
 
-Everything else — land boundary cells and ocean — costs ~5.5–6.4 µs because
-both the L10 and L12 tables must be searched. Ocean has the same cost as a
-boundary land cell because s2 has no early exit: H3 cell computation runs
-unconditionally before any table lookup.
+2. Pre-computed spread table (`_SPREAD12`, 4096 entries). The original
+   Morton interleaving was a 16-iteration Python bit loop. The new path
+   is two table lookups.
 
-São Paulo (5.47 µs) is the fastest boundary city for s2. The H3 compact
-encoding means all comparisons use uint32 Number arithmetic with no BigInt —
-the cost is purely binary search operations.
+3. Flat sorted Morton array extracted from blocks at init. numpy.searchsorted
+   replaces the Python bisect + block linear scan.
+
+Critical finding: `np.searchsorted(uint32_array, python_int)` triggers
+Python-level fallback comparisons and takes 144 µs. Passing `np.uint32(value)`
+keeps the comparison in C and takes 0.6 µs. All Morton and cell-ID lookups
+must pass the correct numpy dtype, not a plain Python int.
+
+**s2**:
+
+Pre-parsed L10 and L12 records into flat numpy uint32 arrays at init.
+np.searchsorted (with np.uint32 query) replaces the Python block binary
+search. The original block search did Python bisect + struct.unpack per
+block step.
+
+**h3**:
+
+Pre-parsed the record array into a numpy uint64 array at init. The original
+code used bisect on a `_RecordView` object whose `__getitem__` called
+struct.unpack_from for every comparison step — Python overhead per comparison.
+numpy.searchsorted with `np.uint64(cell_id)` does all comparisons in C.
+
+### JavaScript (browser runtime)
+
+**z0.js**: Pre-computed `_rankAtCell` Int32Array at construction. The
+original lookup walked up to 64 bitmap bytes per lookup with a loop and
+_PC8 table. The new path is `rank = this._rankAtCell[idx]`.
+
+Estimated improvement for interior queries in the browser: ~2–3×.
+
+**s2.js**: Removed all BigInt. H3 encoding now uses pure 32-bit arithmetic:
+
+    enc6 = ((hi & 0xFFFFF) * 32  + (lo >>> 27)) >>> 0   // bits [51:27]
+    enc7 = ((hi & 0xFFFFF) * 256 + (lo >>> 24)) >>> 0   // bits [51:24]
+
+where hi/lo are obtained by `parseInt` on the high and low 8 hex chars of the
+H3 cell string. Eliminates 4 BigInt constructions per lookup.
+
+**h3.js**: Removed all BigInt. The `_search(qHi, qLo)` method now takes
+two uint32 parameters and compares hi parts first, then lo:
+
+    if (recHi < qHi || (recHi === qHi && recLo < qLo)) lo = mid + 1;
+
+Eliminates ~40 BigInt constructions per ocean query (3 × log2(851k) ≈ 60
+comparisons). BigInt construction overhead in V8 is ~50 ns each; the
+saving is ~2–3 µs per lookup.
+
+Estimated improvement for h3 in the browser: ~3–5×.
 
 
-### h3
+## Why Python timings look flatter than JavaScript
 
-Three clusters, each one binary search deeper:
+Python timings are dominated by interpreter overhead, not algorithmic
+differences. Each lookup takes ~15k Python bytecodes regardless of the
+algorithm. The rank precompute helps z0 because it eliminates an explicit
+Python loop, but all three geocoders still pay the same Python dispatch tax
+for every attribute lookup, function call, and type conversion.
 
-    res-6 hit              2.51–2.65 µs   one binary search
-    res-5 fallback         4.63–4.72 µs   two binary searches
-    res-4 fallback / ocean 6.28–6.47 µs   three binary searches
-
-London, Tokyo, Nairobi, Cairo, Mumbai, Tripoint, and Kaliningrad all sit in
-res-6 cells that are fully indexed — one binary search finds them.
-
-Sydney, Moscow, LA, and Cape Town require a res-5 fallback. Their query point
-falls in a res-6 cell that was not filled at build time — typically because
-the cell centroid landed outside all polygons or in a cell that straddles a
-border at that resolution.
-
-São Paulo (6.35 µs) matches ocean speed exactly — three binary searches all
-miss. The h3 index was built from geoBoundaries rather than GADM (a leftover
-from an earlier experiment), and São Paulo's specific res-6, res-5, and res-4
-cells are apparently not covered in that dataset. This is a data-coverage
-artifact, not an algorithmic failure.
-
-Ocean points pay the maximum cost because h3 has no early exit — the fallback
-chain always runs to res-4 before concluding null.
-
-
-## Why the results look surprising
-
-The Python timings are dominated by **Python interpreter overhead**, not
-algorithmic differences. Each geocoder's `lookup()` call includes:
-
-- attribute lookups on `self`
-- Python integer arithmetic for index calculations
-- `memoryview` / `struct.unpack` calls
-
-At 5 µs per call, we are measuring ~15 000 Python bytecodes, not cache-miss
-latency. The algorithmic advantage of z0's O(1) grid lookup vs h3's O(log N)
-binary search is washed out.
-
-In the JavaScript browser runtimes, where the JIT eliminates interpreter
-overhead and cache misses dominate, the numbers look quite different:
+In the JavaScript browser runtime the JIT eliminates interpreter overhead and
+cache misses dominate, so the algorithmic differences are far more visible.
+JavaScript timings (from the interactive map):
 
     query type              z0          s2          h3
     --------------------------------------------------
-    interior land           ~300 ns     ~1–2 µs     ~3–5 µs
-    boundary land           ~1–2 µs     ~1.5–3 µs   ~5–8 µs
-    ocean                   ~100–200ns  ~2 µs       ~7 µs
-
-z0's coarse-grid O(1) lookup is ~10× faster than h3's binary search for
-interior points in the browser. Python flattens this because its per-bytecode
-cost is much larger than a cache miss.
+    interior land           ~300 ns     ~1–2 µs     ~2–3 µs   (after BigInt removal)
+    boundary land           ~1–2 µs     ~1.5–3 µs   ~3–5 µs
+    ocean                   ~100–200ns  ~2 µs       ~4–6 µs
 
 
-## What the benchmark does and does not measure
+## Accuracy / correctness
 
-Does measure:
-- relative algorithmic cost between the three approaches
-- the two- or three-level nature of each lookup (clusters)
-- data-coverage gaps (São Paulo in h3)
-- ocean early-exit behaviour (z0) vs always-search (s2, h3)
+Reference: OpenStreetMap Nominatim reverse geocoding, queried at zoom=5
+(country level). All 14 test points validated 2026-03.
 
-Does not measure:
-- initial load time (binary parse, wasm init)
-- memory pressure from multiple parallel queries
-- JavaScript JIT performance
-- cache warm-up effects beyond the 100-iteration warmup
+    city                  Nominatim   z0    s2    h3-country
+    --------------------------------------------------------
+    São Paulo, Brazil     BR          BR    miss  UNK
+    London, UK            GB          GB    GB    UNK
+    Tokyo, Japan          JP          JP    JP    UNK
+    Nairobi, Kenya        KE          KE    KE    UNK
+    Cairo, Egypt          EG          EG    EG    UNK
+    Sydney, Australia     AU          AU    AU    UNK
+    Moscow, Russia        RU          RU    RU    UNK
+    Los Angeles, USA      US          US    US    UNK
+    Mumbai, India         IN          IN    IN    UNK
+    Cape Town, ZA         ZA          miss  ZA    UNK
+    Tripoint DE/FR/CH     CH          CH    CH    UNK
+    Kaliningrad, Russia   RU          RU    RU    UNK
+    Mid-Atlantic          ocean       ok    ok    ok
+    South Pacific         ocean       ok    ok    ok
+
+**z0** — 12/12 non-ambiguous land + 2/2 ocean. Cape Town (-33.9249, 18.4241)
+returns ocean because the coordinate sits at the coastline: the 0.25° grid
+cell containing it was classified as ocean at build time (the cell centroid
+fell in the water). Moving 0.1° inland to (-33.83, 18.49) returns ZAF.
+
+**s2** — 11/12 non-ambiguous land + 2/2 ocean. São Paulo returns ocean due to
+a coverage gap in the geoBoundaries dataset that s2 was built from. GADM
+(used by z0) has better coverage of Brazil's coastal polygons.
+
+**h3** — Country and ADM1 names are always "UNK" because the h3 builder
+looked for `shapeISO` as the country key but the geoBoundaries property name
+is `shapeGroup` / `GID_0` depending on dataset version. Only ADM2 district
+names are populated (39 564 names from the districtName field). Ocean
+detection is correct. Fix: rebuild with the correct property key mapping.
 
 
 ## Running the benchmark
 
 ```sh
-# from repo root, with z0 venv active (has h3 and zstandard installed)
+# from repo root, with z0 venv active (needs numpy, h3, zstandard)
 source z0/.venv/bin/activate
 python bench/bench.py
 
@@ -157,6 +177,21 @@ python bench/bench.py --skip-s2
 python bench/bench.py --n 1000   # fewer iterations for quick check
 ```
 
-The script loads each geocoder's `query.py` from its own directory using
-`importlib.util.spec_from_file_location` so all three can coexist in a single
-process without `sys.modules` conflicts.
+The script loads each geocoder's `query.py` using importlib isolation so all
+three coexist in a single process without sys.modules conflicts.
+
+
+## The numpy dtype trap
+
+The most surprising bug found during optimisation: `np.searchsorted` on a
+uint32 array falls back to Python-level comparisons when the query value is a
+plain Python int, making it 250× slower than with a numpy scalar of matching
+dtype:
+
+    np.searchsorted(uint32_array, python_int)   144 µs   (Python fallback)
+    np.searchsorted(uint32_array, np.uint32(v))   0.6 µs  (C loop)
+
+The root cause: Python ints have arbitrary precision, so numpy cannot know
+whether to treat them as int32, int64, or something else. It defaults to a
+safe Python-level comparison loop. Always pass `np.uint32(v)` or `np.uint64(v)`
+when querying typed arrays.

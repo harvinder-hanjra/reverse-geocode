@@ -32,25 +32,26 @@ export class H3 {
 
     for (const res of [RES_FINE, RES_COARSE, RES_COARSEST]) {
       if (res !== RES_FINE) cellStr = h3lib.cellToParent(cellStr, res);
-      const cellInt = BigInt('0x' + cellStr);
-      const packed  = this._search(cellInt);
+      const padded = cellStr.padStart(16, '0');
+      const qHi   = parseInt(padded.slice(0, 8), 16);
+      const qLo   = parseInt(padded.slice(8),    16);
+      const packed = this._search(qHi, qLo);
       if (packed !== null) return this._decode(packed);
     }
     return null;
   }
 
-  _search(cellId) {
+  _search(qHi, qLo) {
     const dv = this._dv;
     let lo = 0, hi = this._nRecords - 1;
     while (lo <= hi) {
-      const mid  = (lo + hi) >> 1;
-      const off  = HDR_SIZE + mid * RECORD_SIZE;
-      const lo32 = dv.getUint32(off,     true);
-      const hi32 = dv.getUint32(off + 4, true);
-      const key  = (BigInt(hi32) << 32n) | BigInt(lo32);
-      if      (key < cellId) lo = mid + 1;
-      else if (key > cellId) hi = mid - 1;
-      else return dv.getUint32(off + 8, true);
+      const mid   = (lo + hi) >> 1;
+      const off   = HDR_SIZE + mid * RECORD_SIZE;
+      const recLo = dv.getUint32(off,     true);
+      const recHi = dv.getUint32(off + 4, true);
+      if      (recHi < qHi || (recHi === qHi && recLo < qLo)) lo = mid + 1;
+      else if (recHi > qHi || (recHi === qHi && recLo > qLo)) hi = mid - 1;
+      else    return dv.getUint32(off + 8, true);
     }
     return null;
   }

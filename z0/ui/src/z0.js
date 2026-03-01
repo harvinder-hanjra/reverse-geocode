@@ -70,6 +70,16 @@ export class Z0 {
 
     // Morton directory: Uint32Array — copy to ensure alignment
     this._mDir = new Uint32Array(buffer.slice(mDirOff, mDirOff + mBlockCount * 4));
+
+    // Pre-compute per-cell rank so lookup() needs no loop
+    const cellCount = GRID_COLS * GRID_ROWS;
+    const rankAtCell = new Int32Array(cellCount);
+    let r = 0;
+    for (let i = 0; i < cellCount; i++) {
+      if ((this._bitmap[i >> 3] >> (i & 7)) & 1) rankAtCell[i] = r++;
+      else rankAtCell[i] = -1;
+    }
+    this._rankAtCell = rankAtCell;
   }
 
   /** Returns admin_id (0–65533) or null for ocean/unclassified. */
@@ -82,18 +92,8 @@ export class Z0 {
     const row = Math.min(GRID_ROWS - 1, Math.max(0, ((90 - lat)  / 0.25) | 0));
     const idx = row * GRID_COLS + col;
 
-    if (!((this._bitmap[idx >> 3] >> (idx & 7)) & 1)) return null;  // ocean
-
-    // Rank via precomputed block base + partial popcount
-    const blk  = (idx / 512) | 0;
-    const bsb  = blk * 64;
-    const into = idx - blk * 512;
-    const full = into >> 3;
-    const rem  = into & 7;
-
-    let rank = this._rank[blk];
-    for (let i = 0; i < full; i++) rank += _PC8[this._bitmap[bsb + i]];
-    if (rem) rank += _PC8[this._bitmap[bsb + full] & ((1 << rem) - 1)];
+    const rank = this._rankAtCell[idx];
+    if (rank < 0) return null;  // ocean
 
     const v = this._values[rank];
     if (v === SENTINEL_OCEAN) return null;
