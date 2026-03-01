@@ -1,60 +1,122 @@
 # Reverse Geocode
 
-Three offline reverse geocoders — given a (lat, lon), return the country and
-administrative region — with interactive map UIs. No network required after
-the data files are built.
+An exploration of offline reverse geocoding — given (lat, lon), return the
+country and administrative region in the browser, with no server, no API key,
+and no network calls after initial load.
 
-| Implementation | Index file | Format | UI port |
-|---|---|---|---|
-| **z0** | `z0_geo.bin` | RGEO0002 | 5174 |
-| **s2** | `s2_geo.bin` | RGEO0001 | 5175 |
-| **h3** | `h3_geo.bin` | LKHA0001 | 5176 |
+Three separate implementations were built to compare different spatial indexing
+strategies at the same problem. Each has its own binary format, builder, and
+interactive map UI.
 
-All three UIs share the same `adm2_render.geojson` basemap (GADM ADM2,
-47 205 regions) and display lookup results + timing on hover.
+    GADM 4.1 (global administrative boundaries, ADM2 level)
+           |
+           v
+    47 205 regions covering the entire land surface
+           |
+        -----------------------------------------------
+        |                   |                         |
+        v                   v                         v
+     z0/                 s2/                        h3/
+     RGEO0002            RGEO0001                   LKHA0001
+     Zig builder         Python builder             Python builder
+     Morton boundary     H3 block binary search     H3 flat binary search
+     11 MB               55 MB                      10 MB
+     port 5174           port 5175                  port 5176
 
-## Structure
 
-```
-reverse-geocode/
-├── z0/          Zig-built Morton-coded geocoder
-│   ├── docs/    Binary format specification
-│   └── ui/      Vite/MapLibre map (port 5174)
-├── s2/          H3-backed block binary search geocoder
-│   ├── docs/    Binary format specification
-│   └── ui/      Vite/MapLibre map (port 5175)
-├── h3/          H3 cell binary search geocoder
-│   ├── docs/    Binary format specification
-│   └── ui/      Vite/MapLibre map (port 5176)
-├── extract_gadm.py         Pull ADM2 features from GADM SQLite
-└── make_render_geojson.py  Build adm2_render.geojson from prep binary
-```
+## The problem
 
-## Data pipeline
+Reverse geocoding is conceptually simple: given a point, find which polygon
+contains it. The naive implementation — load all polygons, test each one — is
+far too slow for interactive use and the polygon data is hundreds of megabytes.
 
-```
-GADM 4.1 SQLite
-      │
-      ▼ extract_gadm.py
-gadm_adm2.geojson
-      │
-      ├─► z0/prepare.py  → z0_prep.bin  → z0/builder.zig → z0_geo.bin
-      ├─► s2/builder.py                              → s2_geo.bin
-      └─► h3/builder.py                              → h3_geo.bin
+The challenge is building a data structure that:
+- fits in a small binary file (< 60 MB, ideally < 15 MB)
+- can be loaded entirely into browser memory
+- answers queries in microseconds, not milliseconds
+- requires no server — pure static file serving
 
-z0_prep.bin ─► make_render_geojson.py → adm2_render.geojson
-```
+All three implementations solve this by pre-computing the hard part (polygon
+containment) at build time and collapsing the result into a compact spatial
+index that the browser can search with simple arithmetic.
 
-## Running the UIs
 
-```sh
-cd z0/ui && bun dev   # http://localhost:5174
-cd s2/ui && bun dev   # http://localhost:5175
-cd h3/ui && bun dev   # http://localhost:5176
-```
+## Data source
 
-Each UI is a self-contained Vite project. The binary index and GeoJSON are
-served from `public/data/` (symlinks to the files in the parent directory).
+**GADM 4.1** (Global Administrative Areas) provides ADM2-level boundaries for
+the entire world: districts, counties, prefectures — the second level of
+administrative subdivision within each country.
+
+The data comes as a SQLite database. `extract_gadm.py` queries it to produce
+a flat GeoJSON FeatureCollection with `country`, `adm1`, and `adm2` properties
+on each feature.
+
+GADM was chosen over alternatives like geoBoundaries because:
+- it has global coverage with no significant gaps
+- the polygons are consistent in structure
+- it distinguishes country / adm1 / adm2 cleanly
+
+
+## The basemap (adm2_render.geojson)
+
+The map rendered in each UI is not tiles. It is a single GeoJSON file
+containing all 47 205 administrative boundaries, simplified to 0.01° (~1 km)
+tolerance, with integer feature IDs that match the geocoder's `admin_id`
+values.
+
+    geocoder.lookup(lat, lon)
+           |
+           v returns admin_id  (integer 0–47204)
+           |
+    adminMap.get(admin_id)
+           |
+           v returns { country, adm1, adm2 }  from GeoJSON properties
+
+
+The GeoJSON is separate from the geocoding index because the geocoder only
+needs to return an integer — the names live in the basemap which is already
+loaded for rendering. This avoids duplicating name data in the binary.
+
+`make_render_geojson.py` builds it from the same prep binary used by the z0
+builder, so the feature IDs are guaranteed to match.
+
+
+## Architecture shared by all three UIs
+
+Each UI loads two files at startup in parallel:
+
+    fetch("adm2_render.geojson")    fetch("*_geo.bin")
+              |                              |
+              v                             v
+      build adminMap                  parse binary
+      stamp country colours           init geocoder
+              |                              |
+              +------------- both ready -----+
+                                   |
+                              attach to map
+                         (layers: land, dividers, hl, hl-border)
+
+
+On every mousemove (via requestAnimationFrame to avoid redundant frames):
+
+    mouse position
+         |
+         v
+    map.unproject()  →  (lat, lng)
+         |
+         +--→  geocoder.lookup(lat, lng)  →  admin_id / {names} / null
+         |           (timed with performance.now())
+         |
+         +--→  map.queryRenderedFeatures()  →  feature id for highlight
+         |
+         v
+    map.setFeatureState(id, { on: true })   ← GPU feature-state, zero CPU
+    ui.update(names, timing, coords)         ← floating tooltip
+
+
+The highlight is decoupled from the geocoder result so it always reflects the
+rendered map, even if the geocoder and GeoJSON were built from different data.
+
 
 ## Approach comparison
 
@@ -72,3 +134,49 @@ every subsequent query in pure JavaScript with no network calls.
   with a three-resolution fallback (res 6 → 5 → 4). The 64-bit keys require
   BigInt arithmetic in JavaScript but the implementation is the simplest of the
   three.
+
+<!-- prettier table -->
+                 z0          s2          h3
+    -----------------------------------------------
+    index size   11 MB       55 MB       10 MB
+    interior     ~300 ns     ~1 µs       ~3 µs
+    boundary     ~1.5 µs     ~2 µs       ~3 µs
+    key type     uint32      uint32      uint64
+    key space    Morton      H3 compact  H3 raw
+    levels        2           2           1 + fallback
+    builder      Zig         Python      Python
+    JS BigInt?   no          no          yes
+
+See `bench/` for methodology and raw numbers.
+
+
+## Running
+
+```sh
+cd z0/ui && bun dev   # http://localhost:5174
+cd s2/ui && bun dev   # http://localhost:5175
+cd h3/ui && bun dev   # http://localhost:5176
+```
+
+Dependencies: `bun`, `zig` (for z0 builder), Python 3.10+ with `shapely`,
+`zstandard`, `h3`, `ijson`.
+
+
+## Data pipeline
+
+```sh
+# 1. Extract from GADM SQLite
+python extract_gadm.py gadm_4.1.gpkg gadm_adm2.geojson
+
+# 2. Build each geocoder
+cd z0 && python prepare.py ../gadm_adm2.geojson z0_prep.bin
+        zig build -Drelease=true
+        ./zig-out/bin/builder z0_prep.bin z0_geo.bin
+
+cd s2 && python builder.py ../gadm_adm2.geojson
+cd h3 && python builder.py ../gadm_adm2.geojson
+        python extract_names.py   # pre-extract names for browser
+
+# 3. Build the render GeoJSON
+python make_render_geojson.py z0/z0_prep.bin z0/ui/public/data/adm2_render.geojson
+```
