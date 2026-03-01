@@ -13,7 +13,7 @@ import { UI } from './ui.js';
 
 // ── Service Worker ────────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').then(() => {
+  navigator.serviceWorker.register('sw.js').then(() => {
     const poll = () => navigator.serviceWorker.controller
       ? ui.setOffline(true) : setTimeout(poll, 700);
     setTimeout(poll, 900);

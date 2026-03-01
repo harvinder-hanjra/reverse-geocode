@@ -41,6 +41,7 @@ jobs:
           cp -r s2/ui/dist/. _site/s2/
           cp -r h3/ui/dist/. _site/h3/
           cp index.html _site/index.html
+          cp favicon.svg _site/favicon.svg
 
       - uses: actions/upload-pages-artifact@v3
         with:
